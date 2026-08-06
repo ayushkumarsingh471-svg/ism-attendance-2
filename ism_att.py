@@ -8,7 +8,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Cream Background Edition")
+app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -378,6 +378,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
     pdf_buf.seek(0)
     return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Attendance_Report_{month}_{year}.pdf"})
 
+
 @app.post("/api/mark_attendance")
 def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subject: str = Form(...), date_str: str = Form(...), status: str = Form(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -567,12 +568,12 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
 # --- FULL HTML FRONTEND ---
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """
+    return r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>ISM Attendance ERP - Final Cream Background Edition</title>
+    <title>ISM Attendance ERP - Final Full Edition</title>
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -639,7 +640,7 @@ def home():
     </div>
 
     <!-- MAIN APP INTERFACE -->
-    <div x-show="loggedIn" class="flex h-screen overflow-hidden relative z-10">
+    <div x-show="loggedIn" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
             <div class="anim-container">
                 <div class="floating-icon" style="left: 10%; animation-delay: 0s; font-size: 30px;">🎓</div>
@@ -728,7 +729,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 2: MARK ATTENDANCE (CREAM BACKGROUND + ORIGINAL SKY BLUE THEME) -->
+            <!-- TAB 2: MARK ATTENDANCE -->
             <div x-show="currentTab === 'mark'">
                 <div class="grid grid-cols-4 gap-4 mb-6">
                     <select x-model="selectedMonth" @change="loadData()" class="w-full p-2.5 rounded-xl">
@@ -750,7 +751,6 @@ def home():
                 </div>
 
                 <div class="grid grid-cols-2 gap-8 items-start" x-show="students.length > 0">
-                    <!-- CREAM BACKGROUND CARD WITH ORIGINAL SKY THEME LAYOUT -->
                     <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 p-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full relative">
                         <div class="w-12 h-2 bg-slate-800 rounded-full mx-auto mb-4"></div>
                         <div class="bg-gradient-to-r from-emerald-700 to-emerald-900 text-white p-3 rounded-xl flex items-center gap-3 border-b-4 border-amber-400">
@@ -871,10 +871,15 @@ def home():
                         </template>
                     </select>
                 </div>
+                
                 <div class="flex gap-4 mb-6">
-                    <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL REPORT (.XLSX)</a>
-                    <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF REPORT (.PDF)</a>
+                    <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
+                    <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
+                    
+                    <!-- NEW CLEAN PDF SHARE BUTTON -->
+                    <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
+                
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center">
                         <thead>
@@ -1184,6 +1189,36 @@ def home():
                     this.reportRows = data.report;
                 },
 
+                // CLEAN PDF SHARE FUNCTION (No custom message, No auto-gmail compose)
+                async shareViaEmail() {
+                    let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
+                    let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
+                    
+                    try {
+                        let response = await fetch(pdfUrl);
+                        let blob = await response.blob();
+                        let file = new File([blob], fileName, {type: "application/pdf"});
+                        
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            await navigator.share({
+                                files: [file]
+                            });
+                            return; 
+                        } else {
+                            throw new Error("Sharing not supported");
+                        }
+                    } catch(e) {
+                        // Fallback: If native share fails, just download the PDF immediately
+                        let a = document.createElement('a');
+                        a.href = pdfUrl;
+                        a.download = fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        alert("PDF Downloaded! You can now manually share it.");
+                    }
+                },
+
                 get currentStudent() {
                     return this.students[this.currentIndex] || { name: '', reg_no: '', roll_no: '' };
                 },
@@ -1379,4 +1414,4 @@ def home():
     </script>
 </body>
 </html>
-    """
+"""

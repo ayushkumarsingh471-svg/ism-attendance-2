@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import base64
 import calendar
 from datetime import datetime, date
@@ -16,12 +17,14 @@ if not DATABASE_URL:
         import streamlit as st
         DATABASE_URL = st.secrets["DATABASE_URL"]
     except:
-        DATABASE_URL = "postgresql://neondb_owner:npg_UD5M9QgOwLIi@ep-crimson-dew-axdarn17-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+        # ✅ Supabase Direct Connection with URL-Encoded Password (Never Sleeps)
+        DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DATABASE_URL)
+# ✅ Added pool_pre_ping=True and pool_recycle to maintain connection stability
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 
 def init_master_db():
     with engine.begin() as conn:
@@ -381,57 +384,62 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
 
 @app.post("/api/mark_attendance")
 def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subject: str = Form(...), date_str: str = Form(...), status: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_subjects = f"{safe_uid}_subjects"
-    t_attendance = f"{safe_uid}_attendance"
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_subjects = f"{safe_uid}_subjects"
+        t_attendance = f"{safe_uid}_attendance"
 
-    with engine.begin() as conn:
-        sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
-        if not sub_id_res: raise HTTPException(status_code=400, detail="Subject not found")
-        sub_id = sub_id_res[0]
+        with engine.begin() as conn:
+            sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+            if not sub_id_res: raise HTTPException(status_code=400, detail="Subject not found")
+            sub_id = sub_id_res[0]
 
-        conn.execute(text(f"""
-            INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
-            VALUES (:sid, :subid, :dt, :stat)
-            ON CONFLICT (student_id, subject_id, date) 
-            DO UPDATE SET status = :stat
-        """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
-
-    return {"success": True}
+            conn.execute(text(f"""
+                INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
+                VALUES (:sid, :subid, :dt, :stat)
+                ON CONFLICT (student_id, subject_id, date) 
+                DO UPDATE SET status = :stat
+            """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/reset_attendance")
 def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: str = Form(None), subject: str = Form("All Subjects"), date_str: str = Form(None)):
-    safe_uid = get_safe_prefix(user_id)
-    t_students = f"{safe_uid}_students"
-    t_subjects = f"{safe_uid}_subjects"
-    t_attendance = f"{safe_uid}_attendance"
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_students = f"{safe_uid}_students"
+        t_subjects = f"{safe_uid}_subjects"
+        t_attendance = f"{safe_uid}_attendance"
 
-    with engine.begin() as conn:
-        if scope == "single" and reg_no:
-            s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
-            if s_res:
-                s_id = s_res[0]
+        with engine.begin() as conn:
+            if scope == "single" and reg_no:
+                s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
+                if s_res:
+                    s_id = s_res[0]
+                    if subject == "All Subjects":
+                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid"), {"sid": s_id})
+                    else:
+                        sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+                        if sub_res:
+                            conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid"), {"sid": s_id, "subid": sub_res[0]})
+            elif scope == "class":
                 if subject == "All Subjects":
-                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid"), {"sid": s_id})
+                    conn.execute(text(f"DELETE FROM {t_attendance}"))
                 else:
                     sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
                     if sub_res:
-                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid"), {"sid": s_id, "subid": sub_res[0]})
-        elif scope == "class":
-            if subject == "All Subjects":
-                conn.execute(text(f"DELETE FROM {t_attendance}"))
-            else:
-                sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
-                if sub_res:
-                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE subject_id=:subid"), {"subid": sub_res[0]})
-        elif scope == "date" and date_str:
-            if subject == "All Subjects":
-                conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt"), {"dt": date_str})
-            else:
-                sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
-                if sub_res:
-                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"dt": date_str, "subid": sub_res[0]})
-    return {"success": True, "message": "Reset executed successfully!"}
+                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE subject_id=:subid"), {"subid": sub_res[0]})
+            elif scope == "date" and date_str:
+                if subject == "All Subjects":
+                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt"), {"dt": date_str})
+                else:
+                    sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+                    if sub_res:
+                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"dt": date_str, "subid": sub_res[0]})
+        return {"success": True, "message": "Reset executed successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/student_details/{user_id}/{reg_no}")
 def get_student_profile(user_id: str, reg_no: str):
@@ -461,109 +469,169 @@ def get_student_profile(user_id: str, reg_no: str):
 
 @app.post("/api/add_student")
 def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str = Form(...), name: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_students = f"{safe_uid}_students"
-    with engine.begin() as conn:
-        conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_no.strip(), "ro": roll_no.strip(), "n": name.strip()})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_students = f"{safe_uid}_students"
+        with engine.begin() as conn:
+            conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_no.strip(), "ro": roll_no.strip(), "n": name.strip()})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/delete_student")
 def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_students = f"{safe_uid}_students"
-    with engine.begin() as conn:
-        conn.execute(text(f"DELETE FROM {t_students} WHERE reg_no=:r"), {"r": reg_no.strip()})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_students = f"{safe_uid}_students"
+        with engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {t_students} WHERE reg_no=:r"), {"r": reg_no.strip()})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+# ✅ NEW SMART AI EXCEL SCANNER (Handles Messy Columns)
 @app.post("/api/bulk_import")
 async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
     contents = await file.read()
+    
     try:
-        if file.filename.endswith('.csv'): df_raw = pd.read_csv(io.BytesIO(contents))
-        else: df_raw = pd.read_excel(io.BytesIO(contents))
-        if len(df_raw.columns) >= 3:
-            df_clean = df_raw.iloc[:, :3].copy()
-            df_clean.columns = ['reg_no', 'roll_no', 'name']
-            df_clean = df_clean.dropna(subset=['reg_no', 'name'])
-            with engine.begin() as conn:
-                for _, row in df_clean.iterrows():
-                    reg = str(row['reg_no']).strip()
-                    if reg.endswith('.0'): reg = reg[:-2]
-                    roll = str(row['roll_no']).strip()
-                    if roll.endswith('.0'): roll = roll[:-2]
-                    name = str(row['name']).strip()
-                    if reg and name and reg.lower() != 'nan':
-                        conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg, "ro": roll, "n": name})
-            return {"success": True, "message": "Bulk import completed successfully!"}
-        else: raise HTTPException(status_code=400, detail="File must have at least 3 columns")
+        if file.filename.endswith('.csv'): 
+            df_raw = pd.read_csv(io.BytesIO(contents))
+        else: 
+            df_raw = pd.read_excel(io.BytesIO(contents))
+            
+        def clean_col(c):
+            return re.sub(r'[^a-zA-Z0-9]', '', str(c).lower())
+            
+        cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
+        
+        mapped_reg, mapped_roll, mapped_name = None, None, None
+        
+        for orig_col, clean_name in cleaned_cols.items():
+            if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
+                mapped_reg = orig_col
+            elif not mapped_roll and 'roll' in clean_name:
+                mapped_roll = orig_col
+            elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
+                mapped_name = orig_col
+                
+        cols = list(df_raw.columns)
+        if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
+        if not mapped_roll and len(cols) > 1: mapped_roll = cols[1]
+        if not mapped_name and len(cols) > 2: mapped_name = cols[2]
+
+        if not mapped_reg or not mapped_name:
+            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Name.")
+
+        inserted = 0
+        with engine.begin() as conn:
+            for _, row in df_raw.iterrows():
+                reg = str(row.get(mapped_reg, "")).strip()
+                if reg.endswith('.0'): reg = reg[:-2]
+                if reg.lower() == 'nan': reg = ""
+                
+                roll = str(row.get(mapped_roll, "")) if mapped_roll else ""
+                roll = roll.strip()
+                if roll.endswith('.0'): roll = roll[:-2]
+                if roll.lower() == 'nan': roll = ""
+
+                name = str(row.get(mapped_name, "")).strip()
+                if name.lower() == 'nan': name = ""
+                
+                if reg and name:
+                    conn.execute(text(f"""
+                        INSERT INTO {t_students} (reg_no, roll_no, name) 
+                        VALUES (:r, :ro, :n) 
+                        ON CONFLICT (reg_no) 
+                        DO UPDATE SET roll_no = EXCLUDED.roll_no, name = EXCLUDED.name
+                    """), {"r": reg, "ro": roll, "n": name})
+                    inserted += 1
+                    
+        return {"success": True, "message": f"Smart Import Done! {inserted} records saved. (Detected Reg: '{mapped_reg}', Name: '{mapped_name}')"}
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/add_subject")
 def add_subject(user_id: str = Form(...), subject_name: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_subjects = f"{safe_uid}_subjects"
-    with engine.begin() as conn:
-        conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": subject_name.strip()})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_subjects = f"{safe_uid}_subjects"
+        with engine.begin() as conn:
+            conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": subject_name.strip()})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/delete_subject")
 def delete_subject(user_id: str = Form(...), subject_name: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_subjects = f"{safe_uid}_subjects"
-    with engine.begin() as conn:
-        conn.execute(text(f"DELETE FROM {t_subjects} WHERE subject_name=:s"), {"s": subject_name.strip()})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_subjects = f"{safe_uid}_subjects"
+        with engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {t_subjects} WHERE subject_name=:s"), {"s": subject_name.strip()})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/upload_logo")
 async def upload_logo(user_id: str = Form(...), file: UploadFile = File(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_settings = f"{safe_uid}_settings"
-    contents = await file.read()
-    ext = file.filename.split('.')[-1].lower()
-    b64_val = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
-    with engine.begin() as conn:
-        conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_logo', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": b64_val})
-    return {"success": True, "logo_url": b64_val}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_settings = f"{safe_uid}_settings"
+        contents = await file.read()
+        ext = file.filename.split('.')[-1].lower()
+        b64_val = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
+        with engine.begin() as conn:
+            conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_logo', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": b64_val})
+        return {"success": True, "logo_url": b64_val}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/save_college_profile")
 def save_college_profile(user_id: str = Form(...), college_name: str = Form(...), subtitle: str = Form(...), course_name: str = Form(...), section_name: str = Form(...)):
-    safe_uid = get_safe_prefix(user_id)
-    t_settings = f"{safe_uid}_settings"
-    with engine.begin() as conn:
-        conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": college_name})
-        conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('app_subtitle', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": subtitle})
-        conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('course_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": course_name})
-        conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('section_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": section_name})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_settings = f"{safe_uid}_settings"
+        with engine.begin() as conn:
+            conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": college_name})
+            conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('app_subtitle', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": subtitle})
+            conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('course_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": course_name})
+            conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('section_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": section_name})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/save_student_profile")
 async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...), email: str = Form(...), contact: str = Form(...), parent_name: str = Form(...), parent_contact: str = Form(...), res_type: str = Form(...), file: UploadFile = File(None)):
-    safe_uid = get_safe_prefix(user_id)
-    t_details = f"{safe_uid}_student_details"
-    encoded_img = None
-    if file and file.filename:
-        contents = await file.read()
-        ext = file.filename.split('.')[-1].lower()
-        encoded_img = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
-    with engine.begin() as conn:
-        if encoded_img:
-            conn.execute(text(f"""
-                INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type, photo_data) 
-                VALUES (:r, :e, :c, :pn, :pc, :rt, :pd)
-                ON CONFLICT (reg_no) 
-                DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type, photo_data = EXCLUDED.photo_data
-            """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type, "pd": encoded_img})
-        else:
-            conn.execute(text(f"""
-                INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type) 
-                VALUES (:r, :e, :c, :pn, :pc, :rt)
-                ON CONFLICT (reg_no) 
-                DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type
-            """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type})
-    return {"success": True}
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_details = f"{safe_uid}_student_details"
+        encoded_img = None
+        if file and file.filename:
+            contents = await file.read()
+            ext = file.filename.split('.')[-1].lower()
+            encoded_img = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
+        with engine.begin() as conn:
+            if encoded_img:
+                conn.execute(text(f"""
+                    INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type, photo_data) 
+                    VALUES (:r, :e, :c, :pn, :pc, :rt, :pd)
+                    ON CONFLICT (reg_no) 
+                    DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type, photo_data = EXCLUDED.photo_data
+                """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type, "pd": encoded_img})
+            else:
+                conn.execute(text(f"""
+                    INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type) 
+                    VALUES (:r, :e, :c, :pn, :pc, :rt)
+                    ON CONFLICT (reg_no) 
+                    DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type
+                """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type})
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- FULL HTML FRONTEND ---
 @app.get("/", response_class=HTMLResponse)
@@ -876,7 +944,6 @@ def home():
                     <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
                     <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
                     
-                    <!-- NEW CLEAN PDF SHARE BUTTON -->
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
                 
@@ -1145,33 +1212,41 @@ def home():
                     let formData = new FormData();
                     formData.append('username', this.authForm.username);
                     formData.append('password', this.authForm.password);
-                    let res = await fetch(endpoint, { method: 'POST', body: formData });
-                    let data = await res.json();
-                    if (res.ok) {
-                        this.userId = this.authForm.username;
-                        this.loggedIn = true;
-                        this.loadData();
-                    } else {
-                        this.authError = data.detail || "Authentication Failed";
+                    try {
+                        let res = await fetch(endpoint, { method: 'POST', body: formData });
+                        let data = await res.json();
+                        if (res.ok) {
+                            this.userId = this.authForm.username;
+                            this.loggedIn = true;
+                            this.loadData();
+                        } else {
+                            this.authError = data.detail || "Authentication Failed";
+                        }
+                    } catch(e) {
+                        this.authError = "Server Connection Error. Check Backend.";
                     }
                 },
 
                 async loadData() {
-                    let res = await fetch(`/api/data/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}&target_date=${this.selectedDate}`);
-                    let data = await res.json();
-                    this.collegeName = data.college_name;
-                    this.appSubtitle = data.app_subtitle;
-                    this.courseName = data.course_name;
-                    this.sectionName = data.section_name;
-                    this.collegeLogo = data.college_logo || this.collegeLogo;
-                    this.totalStudents = data.total_students;
-                    this.classesConducted = data.classes_conducted;
-                    this.presentToday = data.present_today;
-                    this.subjects = data.subjects;
-                    if (!this.selectedSubject && this.subjects.length > 0) this.selectedSubject = this.subjects[0];
-                    if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
-                    this.students = data.students;
-                    if (this.students.length > 0) this.fetchStudentDetails();
+                    try {
+                        let res = await fetch(`/api/data/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}&target_date=${this.selectedDate}`);
+                        let data = await res.json();
+                        this.collegeName = data.college_name;
+                        this.appSubtitle = data.app_subtitle;
+                        this.courseName = data.course_name;
+                        this.sectionName = data.section_name;
+                        this.collegeLogo = data.college_logo || this.collegeLogo;
+                        this.totalStudents = data.total_students;
+                        this.classesConducted = data.classes_conducted;
+                        this.presentToday = data.present_today;
+                        this.subjects = data.subjects;
+                        if (!this.selectedSubject && this.subjects.length > 0) this.selectedSubject = this.subjects[0];
+                        if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
+                        this.students = data.students;
+                        if (this.students.length > 0) this.fetchStudentDetails();
+                    } catch(e) {
+                        console.error("Dashboard Load Error: ", e);
+                    }
                 },
 
                 async loadTableData() {
@@ -1189,7 +1264,6 @@ def home():
                     this.reportRows = data.report;
                 },
 
-                // CLEAN PDF SHARE FUNCTION (No custom message, No auto-gmail compose)
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
@@ -1200,15 +1274,12 @@ def home():
                         let file = new File([blob], fileName, {type: "application/pdf"});
                         
                         if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({
-                                files: [file]
-                            });
+                            await navigator.share({ files: [file] });
                             return; 
                         } else {
                             throw new Error("Sharing not supported");
                         }
                     } catch(e) {
-                        // Fallback: If native share fails, just download the PDF immediately
                         let a = document.createElement('a');
                         a.href = pdfUrl;
                         a.download = fileName;
@@ -1240,13 +1311,17 @@ def home():
                     formData.append('date_str', this.selectedDate);
                     formData.append('status', status);
                     
-                    if (this.currentIndex < this.students.length - 1) {
-                        this.currentIndex++;
-                        this.fetchStudentDetails();
+                    let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                    if (res.ok) {
+                        if (this.currentIndex < this.students.length - 1) {
+                            this.currentIndex++;
+                            this.fetchStudentDetails();
+                        }
+                        this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error saving attendance: " + err);
                     }
-
-                    await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                    this.loadData();
                 },
 
                 searchByReg() {
@@ -1282,6 +1357,9 @@ def home():
                         alert('Student added successfully!');
                         this.newStudent = { reg_no: '', roll_no: '', name: '' };
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error adding student: " + err);
                     }
                 },
 
@@ -1294,6 +1372,9 @@ def home():
                         alert('Student deleted successfully!');
                         this.delRegNo = '';
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error deleting student: " + err);
                     }
                 },
 
@@ -1309,8 +1390,8 @@ def home():
                         alert(data.message);
                         this.loadData();
                     } else {
-                        let err = await res.json();
-                        alert('Import failed: ' + err.detail);
+                        let err = await res.text();
+                        alert('Import failed: ' + err);
                     }
                 },
 
@@ -1327,6 +1408,9 @@ def home():
                         let data = await res.json();
                         alert(data.message);
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error resetting data: " + err);
                     }
                 },
 
@@ -1339,6 +1423,9 @@ def home():
                         alert('Subject added successfully!');
                         this.newSubject = '';
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error adding subject: " + err);
                     }
                 },
 
@@ -1351,6 +1438,9 @@ def home():
                         alert('Subject deleted successfully!');
                         this.delSubject = '';
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error deleting subject: " + err);
                     }
                 },
 
@@ -1365,6 +1455,9 @@ def home():
                         let data = await res.json();
                         this.collegeLogo = data.logo_url;
                         alert('Logo uploaded successfully!');
+                    } else {
+                        let err = await res.text();
+                        alert("Error uploading logo: " + err);
                     }
                 },
 
@@ -1379,6 +1472,9 @@ def home():
                     if (res.ok) {
                         alert('College metadata updated successfully!');
                         this.loadData();
+                    } else {
+                        let err = await res.text();
+                        alert("Error saving profile: " + err);
                     }
                 },
 
@@ -1402,6 +1498,9 @@ def home():
                     if (res.ok) {
                         alert('Student profile & photo saved successfully!');
                         this.fetchStudentDetails();
+                    } else {
+                        let err = await res.text();
+                        alert("Error saving student profile: " + err);
                     }
                 },
 

@@ -246,7 +246,7 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
         data = []
         for s in students:
             s_id, reg, roll, name = s
-            row = {"Sl No": roll, "Registration No": reg, "Student Name": name}
+            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             total_p = 0
             for d in range(1, num_days + 1):
                 val = att_map.get(reg, {}).get(d, "")
@@ -336,7 +336,7 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
         data = []
         for st in students:
             st_id, reg, roll, name = st
-            row = {"Sl No": roll, "Reg No": reg, "Student Name": name}
+            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -389,7 +389,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
         college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
 
-        headers = ["Sl No", "Reg No", "Name"] + subjects + ["Overall %"]
+        headers = ["Roll No", "Reg No", "Name"] + subjects + ["Overall %"]
         table_data = [headers]
 
         for st in students:
@@ -630,7 +630,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
 
 
 # ==========================================
-# 2. NEW API: BULK IMPORT ATTENDANCE
+# 2. API: BULK IMPORT ATTENDANCE (SMART DATE DETECT FIX)
 # ==========================================
 @app.post("/api/import_attendance")
 async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
@@ -659,11 +659,33 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 mapped_reg = orig_col
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
-            elif not mapped_att and ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
-                mapped_att = orig_col
-                
+
+        # ✅ FIXED: Smart Attendance Column Detection for Downloaded Tables
+        try:
+            # Step 1: Check if the exact day number (e.g. '12') is a column
+            target_day = str(int(date_str.split('-')[2]))
+            if target_day in cols:
+                mapped_att = target_day
+            elif int(target_day) in cols:
+                mapped_att = int(target_day)
+        except:
+            pass
+            
+        # Step 2: Fallback if day number is not found
+        if not mapped_att:
+            for orig_col, clean_name in cleaned_cols.items():
+                if ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
+                    mapped_att = orig_col
+                    break
+                    
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
-        if not mapped_att and len(cols) > 1: mapped_att = cols[-1] # Assume last column is attendance if not found
+        
+        # Step 3: Last Resort (Pick the last column, but avoid "Overall %")
+        if not mapped_att and len(cols) > 1: 
+            if cols[-1] == 'Overall %' and len(cols) > 2:
+                mapped_att = cols[-2]
+            else:
+                mapped_att = cols[-1]
 
         if not mapped_reg or not mapped_att:
             raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Attendance Status columns.")
@@ -1047,7 +1069,7 @@ def home():
                     </select>
                 </div>
                 
-                <!-- EXCEL BUTTON FOR TABLE DATA -->
+                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
@@ -1172,7 +1194,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 6: MANAGE STUDENTS (WITH 2 BUTTONS FOR IMPORT) -->
+            <!-- TAB 6: MANAGE STUDENTS -->
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
                 
@@ -1477,7 +1499,6 @@ def home():
                         displayVal = 'P';
                     }
 
-                    // Update UI optimistically
                     student.days[day] = displayVal;
                     
                     let totalP = 0;
@@ -1649,7 +1670,6 @@ def home():
                     }
                 },
 
-                // BUTTON 1 LOGIC: ONLY IMPORT STUDENTS
                 async importStudentsOnly() {
                     let fileInput = document.getElementById('studentOnlyFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
@@ -1669,7 +1689,6 @@ def home():
                     }
                 },
 
-                // BUTTON 2 LOGIC: IMPORT ATTENDANCE
                 async importAttendanceOnly() {
                     let fileInput = document.getElementById('attendanceFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }

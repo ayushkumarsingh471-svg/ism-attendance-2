@@ -8,7 +8,6 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
-from dateutil import parser
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
@@ -18,7 +17,6 @@ if not DATABASE_URL:
         import streamlit as st
         DATABASE_URL = st.secrets["DATABASE_URL"]
     except:
-        # Supabase Direct Connection with URL-Encoded Password (Never Sleeps)
         DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
 
 if DATABASE_URL.startswith("postgres://"):
@@ -437,6 +435,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
     pdf_buf.seek(0)
     return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Attendance_Report_{month}_{year}.pdf"})
 
+
 @app.post("/api/mark_attendance")
 def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subject: str = Form(...), date_str: str = Form(...), status: str = Form(...)):
     try:
@@ -462,6 +461,7 @@ def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subje
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
+
 
 @app.post("/api/reset_attendance")
 def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: str = Form(None), subject: str = Form("All Subjects"), date_str: str = Form(None)):
@@ -560,9 +560,80 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-# ✅ ULTRA SMART AI EXCEL SCANNER (Fully Fault-Tolerant)
-@app.post("/api/bulk_import")
-async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
+
+# ==========================================
+# 1. NEW API: IMPORT ONLY STUDENTS
+# ==========================================
+@app.post("/api/import_students")
+async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
+    safe_uid = get_safe_prefix(user_id)
+    t_students = f"{safe_uid}_students"
+    contents = await file.read()
+    
+    try:
+        if file.filename.endswith('.csv'): 
+            df_raw = pd.read_csv(io.BytesIO(contents))
+        else: 
+            df_raw = pd.read_excel(io.BytesIO(contents))
+            
+        def clean_col(c):
+            return re.sub(r'[^a-zA-Z0-9]', '', str(c).lower())
+            
+        cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
+        cols = list(df_raw.columns)
+        
+        mapped_reg, mapped_roll, mapped_name = None, None, None
+        
+        for orig_col, clean_name in cleaned_cols.items():
+            if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
+                mapped_reg = orig_col
+            elif not mapped_roll and ('roll' in clean_name or 'sl' in clean_name or 'sr' in clean_name or 'sn' in clean_name or 'serial' in clean_name):
+                mapped_roll = orig_col
+            elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
+                mapped_name = orig_col
+                
+        if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
+        if not mapped_roll and len(cols) > 1: mapped_roll = cols[1]
+        if not mapped_name and len(cols) > 2: mapped_name = cols[2]
+
+        if not mapped_reg or not mapped_name:
+            raise HTTPException(status_code=400, detail="Error: Could not find Reg No and Name columns in file.")
+
+        inserted_students = 0
+        with engine.begin() as conn:
+            for _, row in df_raw.iterrows():
+                reg = str(row.get(mapped_reg, "")).strip()
+                if reg.endswith('.0'): reg = reg[:-2]
+                if reg.lower() == 'nan': reg = ""
+                
+                roll = str(row.get(mapped_roll, "")) if mapped_roll else ""
+                roll = roll.strip()
+                if roll.endswith('.0'): roll = roll[:-2]
+                if roll.lower() == 'nan': roll = ""
+
+                name = str(row.get(mapped_name, "")).strip()
+                if name.lower() == 'nan': name = ""
+                
+                if reg and name:
+                    conn.execute(text(f"""
+                        INSERT INTO {t_students} (reg_no, roll_no, name) 
+                        VALUES (:r, :ro, :n) 
+                        ON CONFLICT (reg_no) 
+                        DO UPDATE SET roll_no = EXCLUDED.roll_no, name = EXCLUDED.name
+                    """), {"r": reg, "ro": roll, "n": name})
+                    inserted_students += 1
+                    
+        return {"success": True, "message": f"Successfully registered {inserted_students} students."}
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
+
+
+# ==========================================
+# 2. NEW API: BULK IMPORT ATTENDANCE
+# ==========================================
+@app.post("/api/import_attendance")
+async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
     t_subjects = f"{safe_uid}_subjects"
@@ -581,127 +652,58 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
         cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
         cols = list(df_raw.columns)
         
-        mapped_reg, mapped_roll, mapped_name, mapped_att = None, None, None, None
+        mapped_reg, mapped_name, mapped_att = None, None, None
         
-        # Detect Columns Smartly
         for orig_col, clean_name in cleaned_cols.items():
             if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
                 mapped_reg = orig_col
-            elif not mapped_roll and ('roll' in clean_name or 'sl' in clean_name or 'sr' in clean_name or 'sn' in clean_name or 'serial' in clean_name):
-                mapped_roll = orig_col
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
             elif not mapped_att and ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
                 mapped_att = orig_col
                 
-        # Fallbacks for mandatory columns
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
-        if not mapped_roll and len(cols) > 1: mapped_roll = cols[1]
-        if not mapped_name and len(cols) > 2: mapped_name = cols[2]
+        if not mapped_att and len(cols) > 1: mapped_att = cols[-1] # Assume last column is attendance if not found
 
-        if not mapped_reg or not mapped_name:
-            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Name columns.")
+        if not mapped_reg or not mapped_att:
+            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Attendance Status columns.")
 
-        # Date Detection
-        detected_date = str(date.today())
-        date_regex = r"(\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4})"
-        match_fn = re.search(date_regex, file.filename)
-        if match_fn:
-            try: detected_date = str(parser.parse(match_fn.group(0), fuzzy=True).date())
-            except: pass
-        else:
-            for c in cols:
-                try:
-                    parsed_d = parser.parse(str(c), fuzzy=True)
-                    detected_date = str(parsed_d.date())
-                    # If a column header is a date, it's likely an attendance column
-                    if not mapped_att: mapped_att = c  
-                    break
-                except: pass
-
-        inserted_students = 0
         inserted_att = 0
-        
         with engine.begin() as conn:
-            # Subject Detection
-            sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects}")).fetchall()
-            sub_map = {r[1].lower(): r[0] for r in sub_rows}
-            sub_id = None
-            filename_clean = file.filename.lower()
-            
-            for sub_name, s_id in sub_map.items():
-                if sub_name in filename_clean:
-                    sub_id = s_id
-                    break
-            
-            if not sub_id:
-                for c in cols:
-                    for sub_name, s_id in sub_map.items():
-                        if sub_name in str(c).lower():
-                            sub_id = s_id
-                            break
-                    if sub_id: break
-            
-            # Safe Fallback: If no subject matched, just take the first one in the DB
-            if not sub_id and sub_rows:
-                sub_id = sub_rows[0][0]
+            sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+            if not sub_id_res:
+                 raise HTTPException(status_code=400, detail="Error: Selected Subject not found in database.")
+            sub_id = sub_id_res[0]
 
-            # Insert Data Loop
             for _, row in df_raw.iterrows():
                 reg = str(row.get(mapped_reg, "")).strip()
                 if reg.endswith('.0'): reg = reg[:-2]
                 if reg.lower() == 'nan': reg = ""
                 
-                roll = str(row.get(mapped_roll, "")) if mapped_roll else ""
-                roll = roll.strip()
-                if roll.endswith('.0'): roll = roll[:-2]
-                if roll.lower() == 'nan': roll = ""
-
-                name = str(row.get(mapped_name, "")).strip()
-                if name.lower() == 'nan': name = ""
-                
-                if reg and name:
-                    # Save Student (Works always)
-                    conn.execute(text(f"""
-                        INSERT INTO {t_students} (reg_no, roll_no, name) 
-                        VALUES (:r, :ro, :n) 
-                        ON CONFLICT (reg_no) 
-                        DO UPDATE SET roll_no = EXCLUDED.roll_no, name = EXCLUDED.name
-                    """), {"r": reg, "ro": roll, "n": name})
-                    inserted_students += 1
+                if reg:
+                    att_val = str(row.get(mapped_att, "")).strip().lower()
+                    status = ""
+                    if att_val in ['p', 'present', '1', 'yes', 'true', 'y']:
+                        status = 'Present'
+                    elif att_val in ['a', 'absent', '0', 'no', 'false', 'n']:
+                        status = 'Absent'
+                        
+                    if status:
+                        s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg}).fetchone()
+                        if s_res:
+                            student_id = s_res[0]
+                            conn.execute(text(f"""
+                                INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
+                                VALUES (:sid, :subid, :dt, :stat)
+                                ON CONFLICT (student_id, subject_id, date) 
+                                DO UPDATE SET status = :stat
+                            """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
+                            inserted_att += 1
                     
-                    # Mark Attendance (Only if attendance col AND subject exist)
-                    if mapped_att and sub_id:
-                        att_val = str(row.get(mapped_att, "")).strip().lower()
-                        status = ""
-                        if att_val in ['p', 'present', '1', 'yes', 'true', 'y']:
-                            status = 'Present'
-                        elif att_val in ['a', 'absent', '0', 'no', 'false', 'n']:
-                            status = 'Absent'
-                            
-                        if status:
-                            s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg}).fetchone()
-                            if s_res:
-                                student_id = s_res[0]
-                                conn.execute(text(f"""
-                                    INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
-                                    VALUES (:sid, :subid, :dt, :stat)
-                                    ON CONFLICT (student_id, subject_id, date) 
-                                    DO UPDATE SET status = :stat
-                                """), {"sid": student_id, "subid": sub_id, "dt": detected_date, "stat": status})
-                                inserted_att += 1
-        
-        # Dynamic Success Message
-        msg = f"Smart Import Completed! {inserted_students} Students saved."
-        if inserted_att > 0:
-            msg += f" {inserted_att} Attendance marks saved for {detected_date}."
-        else:
-            msg += " (No attendance data detected in file, only students updated)."
-            
-        return {"success": True, "message": msg}
+        return {"success": True, "message": f"Successfully marked attendance for {inserted_att} students on {date_str} for subject {subject}."}
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
+        raise HTTPException(status_code=400, detail="Attendance Import Failed: " + str(e))
 
 @app.post("/api/add_subject")
 def add_subject(user_id: str = Form(...), subject_name: str = Form(...)):
@@ -1045,7 +1047,7 @@ def home():
                     </select>
                 </div>
                 
-                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
+                <!-- EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
@@ -1170,12 +1172,49 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 6: MANAGE STUDENTS -->
+            <!-- TAB 6: MANAGE STUDENTS (WITH 2 BUTTONS FOR IMPORT) -->
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
+                
+                <!-- NEW: 2 SEPARATE BUTTONS FOR IMPORT -->
+                <div class="grid grid-cols-2 gap-6">
+                    <!-- OPTION 1: IMPORT STUDENTS ONLY -->
+                    <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
+                        <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
+                        <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
+                        
+                        <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
+                        <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
+                    </div>
+
+                    <!-- OPTION 2: IMPORT ATTENDANCE -->
+                    <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
+                        <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
+                        <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
+                        
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="block text-white font-bold text-xs mb-1">Select Subject</label>
+                                <select x-model="importSubject" class="w-full p-2.5 rounded-xl text-sm">
+                                    <template x-for="sub in subjects">
+                                        <option :value="sub" x-text="sub"></option>
+                                    </template>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-white font-bold text-xs mb-1">Select Date</label>
+                                <input type="date" x-model="importDate" class="w-full p-2.5 rounded-xl text-sm">
+                            </div>
+                        </div>
+
+                        <input type="file" id="attendanceFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-emerald-50 text-slate-900">
+                        <button @click="importAttendanceOnly" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow transition">Mark Attendance from File</button>
+                    </div>
+                </div>
+
                 <div class="grid grid-cols-2 gap-6">
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">➕ Add New Student</h3>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">➕ Add Single Student Manually</h3>
                         <form @submit.prevent="addStudent" class="space-y-4">
                             <input type="text" x-model="newStudent.reg_no" placeholder="Registration No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.roll_no" placeholder="Roll No" required class="w-full p-3 rounded-xl">
@@ -1183,27 +1222,9 @@ def home():
                             <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Save Student</button>
                         </form>
                     </div>
-                    <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">🗑️ Delete Student</h3>
-                        <form @submit.prevent="deleteStudent" class="space-y-4">
-                            <input type="text" x-model="delRegNo" placeholder="Enter Reg No to Delete" required class="w-full p-3 rounded-xl">
-                            <button type="submit" class="w-full bg-red-500 hover:bg-red-600 text-white font-black py-3 rounded-xl shadow">Delete Student</button>
-                        </form>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-2 gap-6">
-                    <!-- NEW ULTRA SMART AI IMPORT (NO DROPDOWNS REQUIRED) -->
-                    <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">📥 Ultra Smart Bulk Import</h3>
-                        <p class="text-xs text-sky-200 mb-3">Just upload your Excel/CSV. AI will automatically read Roll No, Reg No, Name, and Attendance marks. It will also auto-detect Date and Subject from the file!</p>
-                        
-                        <input type="file" id="bulkFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50 mt-4">
-                        <button @click="bulkImport" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Scan & Import Data Automatically</button>
-                    </div>
 
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">📸 Upload Photo & Student Profile Details</h3>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">📸 Upload Photo & Profile Details</h3>
                         <form @submit.prevent="saveStudentProfile" class="space-y-3">
                             <select x-model="profileReg" class="w-full p-2.5 rounded-xl">
                                 <option value="">--- Select Student ---</option>
@@ -1220,11 +1241,11 @@ def home():
                                 <option>🏠 HOSTELER (Hostel Resident)</option>
                                 <option>🚌 DAY SCHOLAR (Regular / Up-Down)</option>
                             </select>
-                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile & Cloud Photo</button>
+                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile</button>
                         </form>
                     </div>
                     
-                    <!-- DANGER ZONE: DELETE ALL STUDENTS -->
+                    <!-- DANGER ZONE -->
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
                         <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>
@@ -1356,6 +1377,9 @@ def home():
                 resetReg: '',
                 resetSubject: 'All Subjects',
                 resetDate: curDate,
+                
+                importSubject: '',
+                importDate: curDate,
 
                 init() {
                     this.syncFromDate();
@@ -1420,6 +1444,7 @@ def home():
                         this.subjects = data.subjects;
                         if (!this.selectedSubject && this.subjects.length > 0) this.selectedSubject = this.subjects[0];
                         if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
+                        if (!this.importSubject && this.subjects.length > 0) this.importSubject = this.subjects[0];
                         this.students = data.students;
                         if (this.students.length > 0) this.fetchStudentDetails();
                     } catch(e) {
@@ -1624,15 +1649,40 @@ def home():
                     }
                 },
 
-                async bulkImport() {
-                    let fileInput = document.getElementById('bulkFile');
+                // BUTTON 1 LOGIC: ONLY IMPORT STUDENTS
+                async importStudentsOnly() {
+                    let fileInput = document.getElementById('studentOnlyFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
                     
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
 
-                    let res = await fetch('/api/bulk_import', { method: 'POST', body: formData });
+                    let res = await fetch('/api/import_students', { method: 'POST', body: formData });
+                    if (res.ok) {
+                        let data = await res.json();
+                        alert(data.message);
+                        this.loadData();
+                    } else {
+                        let err = await res.json();
+                        alert('Import failed: ' + err.detail);
+                    }
+                },
+
+                // BUTTON 2 LOGIC: IMPORT ATTENDANCE
+                async importAttendanceOnly() {
+                    let fileInput = document.getElementById('attendanceFile');
+                    if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
+                    if (!this.importSubject) { alert('Please select a subject.'); return; }
+                    if (!this.importDate) { alert('Please select a date.'); return; }
+                    
+                    let formData = new FormData();
+                    formData.append('user_id', this.userId);
+                    formData.append('file', fileInput.files[0]);
+                    formData.append('subject', this.importSubject);
+                    formData.append('date_str', this.importDate);
+
+                    let res = await fetch('/api/import_attendance', { method: 'POST', body: formData });
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);

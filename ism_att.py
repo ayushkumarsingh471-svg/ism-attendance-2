@@ -8,6 +8,7 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
+from dateutil import parser
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
@@ -247,7 +248,7 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
         data = []
         for s in students:
             s_id, reg, roll, name = s
-            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
+            row = {"Sl No": roll, "Registration No": reg, "Student Name": name}
             total_p = 0
             for d in range(1, num_days + 1):
                 val = att_map.get(reg, {}).get(d, "")
@@ -337,7 +338,7 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
         data = []
         for st in students:
             st_id, reg, roll, name = st
-            row = {"Reg No": reg, "Roll No": roll, "Student Name": name}
+            row = {"Sl No": roll, "Reg No": reg, "Student Name": name}
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -390,12 +391,12 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
         college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
 
-        headers = ["Reg No", "Roll", "Name"] + subjects + ["Overall %"]
+        headers = ["Sl No", "Reg No", "Name"] + subjects + ["Overall %"]
         table_data = [headers]
 
         for st in students:
             st_id, reg, roll, name = st
-            row = [str(reg), str(roll), str(name)]
+            row = [str(roll), str(reg), str(name)]
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -435,7 +436,6 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
     doc.build(elements)
     pdf_buf.seek(0)
     return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Attendance_Report_{month}_{year}.pdf"})
-
 
 @app.post("/api/mark_attendance")
 def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subject: str = Form(...), date_str: str = Form(...), status: str = Form(...)):
@@ -560,10 +560,13 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
+# ✅ ULTRA SMART AI EXCEL SCANNER (Fully Fault-Tolerant)
 @app.post("/api/bulk_import")
 async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
+    t_subjects = f"{safe_uid}_subjects"
+    t_attendance = f"{safe_uid}_attendance"
     contents = await file.read()
     
     try:
@@ -576,18 +579,22 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
             return re.sub(r'[^a-zA-Z0-9]', '', str(c).lower())
             
         cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
+        cols = list(df_raw.columns)
         
-        mapped_reg, mapped_roll, mapped_name = None, None, None
+        mapped_reg, mapped_roll, mapped_name, mapped_att = None, None, None, None
         
+        # Detect Columns Smartly
         for orig_col, clean_name in cleaned_cols.items():
             if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
                 mapped_reg = orig_col
-            elif not mapped_roll and 'roll' in clean_name:
+            elif not mapped_roll and ('roll' in clean_name or 'sl' in clean_name or 'sr' in clean_name or 'sn' in clean_name or 'serial' in clean_name):
                 mapped_roll = orig_col
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
+            elif not mapped_att and ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
+                mapped_att = orig_col
                 
-        cols = list(df_raw.columns)
+        # Fallbacks for mandatory columns
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
         if not mapped_roll and len(cols) > 1: mapped_roll = cols[1]
         if not mapped_name and len(cols) > 2: mapped_name = cols[2]
@@ -595,8 +602,51 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
         if not mapped_reg or not mapped_name:
             raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Name columns.")
 
-        inserted = 0
+        # Date Detection
+        detected_date = str(date.today())
+        date_regex = r"(\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4})"
+        match_fn = re.search(date_regex, file.filename)
+        if match_fn:
+            try: detected_date = str(parser.parse(match_fn.group(0), fuzzy=True).date())
+            except: pass
+        else:
+            for c in cols:
+                try:
+                    parsed_d = parser.parse(str(c), fuzzy=True)
+                    detected_date = str(parsed_d.date())
+                    # If a column header is a date, it's likely an attendance column
+                    if not mapped_att: mapped_att = c  
+                    break
+                except: pass
+
+        inserted_students = 0
+        inserted_att = 0
+        
         with engine.begin() as conn:
+            # Subject Detection
+            sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects}")).fetchall()
+            sub_map = {r[1].lower(): r[0] for r in sub_rows}
+            sub_id = None
+            filename_clean = file.filename.lower()
+            
+            for sub_name, s_id in sub_map.items():
+                if sub_name in filename_clean:
+                    sub_id = s_id
+                    break
+            
+            if not sub_id:
+                for c in cols:
+                    for sub_name, s_id in sub_map.items():
+                        if sub_name in str(c).lower():
+                            sub_id = s_id
+                            break
+                    if sub_id: break
+            
+            # Safe Fallback: If no subject matched, just take the first one in the DB
+            if not sub_id and sub_rows:
+                sub_id = sub_rows[0][0]
+
+            # Insert Data Loop
             for _, row in df_raw.iterrows():
                 reg = str(row.get(mapped_reg, "")).strip()
                 if reg.endswith('.0'): reg = reg[:-2]
@@ -611,15 +661,44 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
                 if name.lower() == 'nan': name = ""
                 
                 if reg and name:
+                    # Save Student (Works always)
                     conn.execute(text(f"""
                         INSERT INTO {t_students} (reg_no, roll_no, name) 
                         VALUES (:r, :ro, :n) 
                         ON CONFLICT (reg_no) 
                         DO UPDATE SET roll_no = EXCLUDED.roll_no, name = EXCLUDED.name
                     """), {"r": reg, "ro": roll, "n": name})
-                    inserted += 1
+                    inserted_students += 1
                     
-        return {"success": True, "message": f"Smart Import Completed! {inserted} records saved successfully."}
+                    # Mark Attendance (Only if attendance col AND subject exist)
+                    if mapped_att and sub_id:
+                        att_val = str(row.get(mapped_att, "")).strip().lower()
+                        status = ""
+                        if att_val in ['p', 'present', '1', 'yes', 'true', 'y']:
+                            status = 'Present'
+                        elif att_val in ['a', 'absent', '0', 'no', 'false', 'n']:
+                            status = 'Absent'
+                            
+                        if status:
+                            s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg}).fetchone()
+                            if s_res:
+                                student_id = s_res[0]
+                                conn.execute(text(f"""
+                                    INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
+                                    VALUES (:sid, :subid, :dt, :stat)
+                                    ON CONFLICT (student_id, subject_id, date) 
+                                    DO UPDATE SET status = :stat
+                                """), {"sid": student_id, "subid": sub_id, "dt": detected_date, "stat": status})
+                                inserted_att += 1
+        
+        # Dynamic Success Message
+        msg = f"Smart Import Completed! {inserted_students} Students saved."
+        if inserted_att > 0:
+            msg += f" {inserted_att} Attendance marks saved for {detected_date}."
+        else:
+            msg += " (No attendance data detected in file, only students updated)."
+            
+        return {"success": True, "message": msg}
         
     except Exception as e:
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
@@ -796,7 +875,7 @@ def home():
                     <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
                     <button @click="currentTab = 'table'; syncToLive(); loadTableData()" :class="currentTab === 'table' ? 'bg-purple-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-purple-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📅 Attendance Table</button>
                     <button @click="currentTab = 'report'; syncToLive(); loadReportData()" :class="currentTab === 'report' ? 'bg-amber-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-amber-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📑 Monthly Compile Report</button>
-                    <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Attendance</button>
+                    <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
                     <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
                     <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
                 </nav>
@@ -921,7 +1000,6 @@ def home():
                     <div class="space-y-6">
                         <h3 class="text-xl font-black text-amber-400 flex items-center gap-2">⚡ Action Controls:</h3>
                         <div class="grid grid-cols-2 gap-4">
-                            <!-- ✅ The Mark Present / Absent buttons are explicitly maintained here -->
                             <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🟢 MARK PRESENT (P)</button>
                             <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🔴 MARK ABSENT (A)</button>
                         </div>
@@ -1115,10 +1193,13 @@ def home():
                 </div>
 
                 <div class="grid grid-cols-2 gap-6">
+                    <!-- NEW ULTRA SMART AI IMPORT (NO DROPDOWNS REQUIRED) -->
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">📥 Bulk Import (Excel/CSV)</h3>
-                        <input type="file" id="bulkFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                        <button @click="bulkImport" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Import Data</button>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">📥 Ultra Smart Bulk Import</h3>
+                        <p class="text-xs text-sky-200 mb-3">Just upload your Excel/CSV. AI will automatically read Roll No, Reg No, Name, and Attendance marks. It will also auto-detect Date and Subject from the file!</p>
+                        
+                        <input type="file" id="bulkFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50 mt-4">
+                        <button @click="bulkImport" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Scan & Import Data Automatically</button>
                     </div>
 
                     <div class="glass-card p-6 rounded-2xl">
@@ -1143,7 +1224,7 @@ def home():
                         </form>
                     </div>
                     
-                    <!-- NEW OPTION: DELETE ALL STUDENTS -->
+                    <!-- DANGER ZONE: DELETE ALL STUDENTS -->
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
                         <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>
@@ -1355,7 +1436,6 @@ def home():
                     this.tableTotalClasses = data.total_classes;
                 },
 
-                // NEW INLINE EDITOR LOGIC
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day];
                     let nextStatus = '';
@@ -1375,18 +1455,15 @@ def home():
                     // Update UI optimistically
                     student.days[day] = displayVal;
                     
-                    // Recalculate percentage for display
                     let totalP = 0;
                     for (let d = 1; d <= this.tableNumDays; d++) {
                         if (student.days[d] === 'P') totalP++;
                     }
                     student.pct = this.tableTotalClasses > 0 ? Math.round((totalP / this.tableTotalClasses) * 100) : 0;
 
-                    // Format Date string
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
-                    // Call backend to save
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', student.id);
@@ -1399,7 +1476,7 @@ def home():
                         if (!res.ok) {
                             let err = await res.json();
                             alert("Error updating attendance: " + err.detail);
-                            this.loadTableData(); // Restore on error
+                            this.loadTableData(); 
                         }
                     } catch(e) {
                         alert("Network error while updating attendance. Please check your connection.");
@@ -1453,7 +1530,6 @@ def home():
                     this.currentStudentPhoto = data.photo_data;
                 },
 
-                // ✅ FIX: Renamed this function for the "Mark Attendance" buttons
                 async markStatusBtn(status) {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -1531,7 +1607,6 @@ def home():
                     }
                 },
 
-                // NEW: DELETE ALL STUDENTS FEATURE
                 async deleteAllStudents() {
                     if (!confirm("WARNING: Are you entirely sure you want to delete ALL students and their attendance data? This action cannot be undone.")) return;
                     
@@ -1552,9 +1627,11 @@ def home():
                 async bulkImport() {
                     let fileInput = document.getElementById('bulkFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
+                    
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
+
                     let res = await fetch('/api/bulk_import', { method: 'POST', body: formData });
                     if (res.ok) {
                         let data = await res.json();

@@ -17,14 +17,14 @@ if not DATABASE_URL:
         import streamlit as st
         DATABASE_URL = st.secrets["DATABASE_URL"]
     except:
-        # ✅ Supabase Direct Connection with URL-Encoded Password (Never Sleeps)
+        # Supabase Direct Connection with URL-Encoded Password (Never Sleeps)
         DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# ✅ Added pool_pre_ping=True and pool_recycle to maintain connection stability
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+from sqlalchemy.pool import NullPool
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, poolclass=NullPool)
 
 def init_master_db():
     with engine.begin() as conn:
@@ -93,7 +93,7 @@ def login(username: str = Form(...), password: str = Form(...)):
     if res:
         init_tenant_db(u)
         return {"success": True, "user": u}
-    raise HTTPException(status_code=400, detail="Invalid User ID or Password")
+    raise HTTPException(status_code=400, detail="Invalid User ID or Password.")
 
 @app.post("/api/register")
 def register(username: str = Form(...), password: str = Form(...)):
@@ -106,7 +106,7 @@ def register(username: str = Form(...), password: str = Form(...)):
         init_tenant_db(u)
         return {"success": True}
     except Exception:
-        raise HTTPException(status_code=400, detail="User ID already exists.")
+        raise HTTPException(status_code=400, detail="User ID already exists. Please choose another.")
 
 @app.get("/api/data/{user_id}")
 def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE", target_date: str = "2026-07-25"):
@@ -205,9 +205,64 @@ def get_attendance_table(user_id: str, month: str = "July", year: int = 2026, su
                 days_data[d] = val
                 if val == 'P': total_p += 1
             pct = round((total_p / tc_count * 100)) if tc_count > 0 else 0
-            result.append({"reg_no": reg, "roll_no": roll, "name": name, "days": days_data, "pct": pct})
+            result.append({"id": s_id, "reg_no": reg, "roll_no": roll, "name": name, "days": days_data, "pct": pct})
 
     return {"num_days": num_days, "table_data": result, "total_classes": tc_count}
+
+@app.get("/api/download_table_excel/{user_id}")
+def download_table_excel(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE"):
+    safe_uid = get_safe_prefix(user_id)
+    t_students = f"{safe_uid}_students"
+    t_subjects = f"{safe_uid}_subjects"
+    t_attendance = f"{safe_uid}_attendance"
+
+    month_num = list(calendar.month_name).index(month) if month in list(calendar.month_name) else 7
+    date_pattern = f"{year}-{month_num:02d}-%"
+    num_days = calendar.monthrange(year, month_num)[1]
+
+    with engine.begin() as conn:
+        sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+        sub_id = sub_id_res[0] if sub_id_res else None
+
+        students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
+        students = sort_students_safely(students_raw)
+        
+        att_map = {}
+        tc_count = 0
+        if sub_id:
+            tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
+            records = conn.execute(text(f"""
+                SELECT s.reg_no, a.date, a.status FROM {t_attendance} a 
+                JOIN {t_students} s ON a.student_id = s.id
+                WHERE a.subject_id = :sid AND a.date LIKE :d
+            """), {"sid": sub_id, "d": date_pattern}).fetchall()
+            
+            for r_no, d_str, stat in records:
+                try:
+                    day_idx = int(d_str.split('-')[2])
+                    if r_no not in att_map: att_map[r_no] = {}
+                    att_map[r_no][day_idx] = 'P' if stat == 'Present' else 'A'
+                except: pass
+
+        data = []
+        for s in students:
+            s_id, reg, roll, name = s
+            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
+            total_p = 0
+            for d in range(1, num_days + 1):
+                val = att_map.get(reg, {}).get(d, "")
+                row[str(d)] = val
+                if val == 'P': total_p += 1
+            pct = round((total_p / tc_count * 100)) if tc_count > 0 else 0
+            row["Overall %"] = f"{pct}%"
+            data.append(row)
+
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=f"{subject}_{month}")
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Daily_Table_{subject}_{month}_{year}.xlsx"})
 
 @app.get("/api/compile_report/{user_id}")
 def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
@@ -391,18 +446,22 @@ def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subje
 
         with engine.begin() as conn:
             sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
-            if not sub_id_res: raise HTTPException(status_code=400, detail="Subject not found")
+            if not sub_id_res: raise HTTPException(status_code=400, detail="Subject not found.")
             sub_id = sub_id_res[0]
 
-            conn.execute(text(f"""
-                INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
-                VALUES (:sid, :subid, :dt, :stat)
-                ON CONFLICT (student_id, subject_id, date) 
-                DO UPDATE SET status = :stat
-            """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
+            if status == 'Clear':
+                conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid AND date=:dt"), 
+                             {"sid": student_id, "subid": sub_id, "dt": date_str})
+            else:
+                conn.execute(text(f"""
+                    INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
+                    VALUES (:sid, :subid, :dt, :stat)
+                    ON CONFLICT (student_id, subject_id, date) 
+                    DO UPDATE SET status = :stat
+                """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/reset_attendance")
 def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: str = Form(None), subject: str = Form("All Subjects"), date_str: str = Form(None)):
@@ -437,9 +496,21 @@ def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: s
                     sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
                     if sub_res:
                         conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"dt": date_str, "subid": sub_res[0]})
-        return {"success": True, "message": "Reset executed successfully!"}
+        return {"success": True, "message": "Attendance logs reset executed successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
+
+@app.post("/api/delete_all_students")
+def delete_all_students(user_id: str = Form(...)):
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        with engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {safe_uid}_attendance"))
+            conn.execute(text(f"DELETE FROM {safe_uid}_student_details"))
+            conn.execute(text(f"DELETE FROM {safe_uid}_students"))
+        return {"success": True, "message": "All students and their records deleted successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.get("/api/student_details/{user_id}/{reg_no}")
 def get_student_profile(user_id: str, reg_no: str):
@@ -474,9 +545,9 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
         t_students = f"{safe_uid}_students"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_no.strip(), "ro": roll_no.strip(), "n": name.strip()})
-        return {"success": True}
+        return {"success": True, "message": "Student added successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/delete_student")
 def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
@@ -485,11 +556,10 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
         t_students = f"{safe_uid}_students"
         with engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {t_students} WHERE reg_no=:r"), {"r": reg_no.strip()})
-        return {"success": True}
+        return {"success": True, "message": "Student deleted successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-# ✅ NEW SMART AI EXCEL SCANNER (Handles Messy Columns)
 @app.post("/api/bulk_import")
 async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -523,7 +593,7 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
         if not mapped_name and len(cols) > 2: mapped_name = cols[2]
 
         if not mapped_reg or not mapped_name:
-            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Name.")
+            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Name columns.")
 
         inserted = 0
         with engine.begin() as conn:
@@ -549,10 +619,10 @@ async def bulk_import(user_id: str = Form(...), file: UploadFile = File(...)):
                     """), {"r": reg, "ro": roll, "n": name})
                     inserted += 1
                     
-        return {"success": True, "message": f"Smart Import Done! {inserted} records saved. (Detected Reg: '{mapped_reg}', Name: '{mapped_name}')"}
+        return {"success": True, "message": f"Smart Import Completed! {inserted} records saved successfully."}
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
 
 @app.post("/api/add_subject")
 def add_subject(user_id: str = Form(...), subject_name: str = Form(...)):
@@ -561,9 +631,9 @@ def add_subject(user_id: str = Form(...), subject_name: str = Form(...)):
         t_subjects = f"{safe_uid}_subjects"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": subject_name.strip()})
-        return {"success": True}
+        return {"success": True, "message": "Subject added successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/delete_subject")
 def delete_subject(user_id: str = Form(...), subject_name: str = Form(...)):
@@ -572,9 +642,9 @@ def delete_subject(user_id: str = Form(...), subject_name: str = Form(...)):
         t_subjects = f"{safe_uid}_subjects"
         with engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {t_subjects} WHERE subject_name=:s"), {"s": subject_name.strip()})
-        return {"success": True}
+        return {"success": True, "message": "Subject deleted successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/upload_logo")
 async def upload_logo(user_id: str = Form(...), file: UploadFile = File(...)):
@@ -586,9 +656,9 @@ async def upload_logo(user_id: str = Form(...), file: UploadFile = File(...)):
         b64_val = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_logo', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": b64_val})
-        return {"success": True, "logo_url": b64_val}
+        return {"success": True, "logo_url": b64_val, "message": "Logo uploaded successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/save_college_profile")
 def save_college_profile(user_id: str = Form(...), college_name: str = Form(...), subtitle: str = Form(...), course_name: str = Form(...), section_name: str = Form(...)):
@@ -600,9 +670,9 @@ def save_college_profile(user_id: str = Form(...), college_name: str = Form(...)
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('app_subtitle', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": subtitle})
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('course_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": course_name})
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('section_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": section_name})
-        return {"success": True}
+        return {"success": True, "message": "College profile updated successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 @app.post("/api/save_student_profile")
 async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...), email: str = Form(...), contact: str = Form(...), parent_name: str = Form(...), parent_contact: str = Form(...), res_type: str = Form(...), file: UploadFile = File(None)):
@@ -629,9 +699,9 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
                     ON CONFLICT (reg_no) 
                     DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type
                 """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type})
-        return {"success": True}
+        return {"success": True, "message": "Student profile saved successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # --- FULL HTML FRONTEND ---
 @app.get("/", response_class=HTMLResponse)
@@ -851,8 +921,9 @@ def home():
                     <div class="space-y-6">
                         <h3 class="text-xl font-black text-amber-400 flex items-center gap-2">⚡ Action Controls:</h3>
                         <div class="grid grid-cols-2 gap-4">
-                            <button @click="markStatus('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🟢 MARK PRESENT (P)</button>
-                            <button @click="markStatus('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🔴 MARK ABSENT (A)</button>
+                            <!-- ✅ The Mark Present / Absent buttons are explicitly maintained here -->
+                            <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🟢 MARK PRESENT (P)</button>
+                            <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🔴 MARK ABSENT (A)</button>
                         </div>
                         <div>
                             <label class="block text-white font-bold text-sm mb-1">🔍 Search Student Directly by Reg No:</label>
@@ -874,10 +945,11 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE -->
+            <!-- TAB 3: ATTENDANCE TABLE (NEW EXCEL DOWNLOAD & INLINE CLICK EDITING) -->
             <div x-show="currentTab === 'table'">
-                <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register</h2>
-                <div class="grid grid-cols-3 gap-4 mb-6">
+                <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
+                
+                <div class="grid grid-cols-3 gap-4 mb-4">
                     <select x-model="tableMonth" @change="loadTableData()" class="w-full p-2.5 rounded-xl">
                         <template x-for="m in months">
                             <option :value="m" :selected="m == tableMonth" x-text="m"></option>
@@ -894,6 +966,14 @@ def home():
                         </template>
                     </select>
                 </div>
+                
+                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
+                <div class="flex gap-4 mb-6">
+                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                </div>
+                
+                <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: You can click directly on any box below to toggle Attendance (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
+
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table border-collapse">
                         <thead>
@@ -913,9 +993,17 @@ def home():
                                     <td class="p-3 border sticky left-0 bg-sky-50 z-10" x-text="st.reg_no"></td>
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
+                                    
+                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
-                                        <td class="border text-xs text-center" :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black' : '')" x-text="st.days[d]"></td>
+                                        <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
+                                            title="Click to toggle Present/Absent"
+                                            :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black hover:bg-emerald-600' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black hover:bg-red-600' : 'hover:bg-sky-200')" 
+                                            x-text="st.days[d]"
+                                            @click="toggleCellAttendance(st, d)">
+                                        </td>
                                     </template>
+                                    
                                     <td class="p-3 border font-black text-blue-800" x-text="st.pct + '%'"></td>
                                 </tr>
                             </template>
@@ -979,7 +1067,7 @@ def home():
 
             <!-- TAB 5: RESET / CLEAR ATTENDANCE -->
             <div x-show="currentTab === 'reset'">
-                <h2 class="text-2xl font-black text-white mb-4">🧹 Reset / Clear Attendance Logs (Student & Class Level)</h2>
+                <h2 class="text-2xl font-black text-white mb-4">🧹 Reset / Clear Attendance Logs</h2>
                 <div class="glass-card p-6 rounded-2xl space-y-6">
                     <div>
                         <label class="block text-sky-400 font-bold mb-2">Select Reset Scope:</label>
@@ -1014,7 +1102,7 @@ def home():
                             <input type="text" x-model="newStudent.reg_no" placeholder="Registration No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.roll_no" placeholder="Roll No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.name" placeholder="Full Name" required class="w-full p-3 rounded-xl">
-                            <button type="submit" class="w-full bg-red-500 hover:bg-red-600 text-white font-black py-3 rounded-xl shadow">Save Student</button>
+                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Save Student</button>
                         </form>
                     </div>
                     <div class="glass-card p-6 rounded-2xl">
@@ -1030,7 +1118,7 @@ def home():
                     <div class="glass-card p-6 rounded-2xl">
                         <h3 class="text-xl font-black text-sky-400 mb-4">📥 Bulk Import (Excel/CSV)</h3>
                         <input type="file" id="bulkFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                        <button @click="bulkImport" class="w-full bg-red-500 hover:bg-red-600 text-white font-black py-3 rounded-xl shadow">Import Data</button>
+                        <button @click="bulkImport" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Import Data</button>
                     </div>
 
                     <div class="glass-card p-6 rounded-2xl">
@@ -1051,9 +1139,17 @@ def home():
                                 <option>🏠 HOSTELER (Hostel Resident)</option>
                                 <option>🚌 DAY SCHOLAR (Regular / Up-Down)</option>
                             </select>
-                            <button type="submit" class="w-full bg-red-500 hover:bg-red-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile & Cloud Photo</button>
+                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile & Cloud Photo</button>
                         </form>
                     </div>
+                    
+                    <!-- NEW OPTION: DELETE ALL STUDENTS -->
+                    <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
+                        <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
+                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>
+                        <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
+                    </div>
+
                 </div>
             </div>
 
@@ -1080,7 +1176,7 @@ def home():
                                 <label class="block text-sky-400 font-bold text-xs mb-1">Semester / Section</label>
                                 <input type="text" x-model="sectionName" required class="w-full p-3 rounded-xl">
                             </div>
-                            <button type="submit" class="w-full bg-red-500 text-white font-black py-3 rounded-xl shadow">Save Metadata</button>
+                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Metadata</button>
                         </form>
                     </div>
                     <div class="space-y-6">
@@ -1088,7 +1184,7 @@ def home():
                             <h3 class="text-xl font-black text-sky-400 mb-4">📚 Add Subject</h3>
                             <form @submit.prevent="addSubject" class="space-y-4">
                                 <input type="text" x-model="newSubject" placeholder="Subject Name" required class="w-full p-3 rounded-xl">
-                                <button type="submit" class="w-full bg-red-500 text-white font-black py-3 rounded-xl shadow">Add Subject</button>
+                                <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Add Subject</button>
                             </form>
                         </div>
                         <div class="glass-card p-6 rounded-2xl">
@@ -1106,7 +1202,7 @@ def home():
                         <div class="glass-card p-6 rounded-2xl">
                             <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ College Logo (Cloud Secured)</h3>
                             <input type="file" id="logoFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                            <button @click="uploadLogo" class="w-full bg-red-500 hover:bg-red-600 text-white font-black py-3 rounded-xl shadow">Upload Logo to Cloud</button>
+                            <button @click="uploadLogo" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Upload Logo to Cloud</button>
                         </div>
                     </div>
                 </div>
@@ -1168,6 +1264,7 @@ def home():
                 tableSubject: '',
                 tableNumDays: 31,
                 tableRows: [],
+                tableTotalClasses: 0,
 
                 reportMonth: curMonth,
                 reportYear: curYear,
@@ -1220,7 +1317,7 @@ def home():
                             this.loggedIn = true;
                             this.loadData();
                         } else {
-                            this.authError = data.detail || "Authentication Failed";
+                            this.authError = data.detail || "Authentication Failed. Please try again.";
                         }
                     } catch(e) {
                         this.authError = "Server Connection Error. Check Backend.";
@@ -1255,6 +1352,59 @@ def home():
                     let data = await res.json();
                     this.tableNumDays = data.num_days;
                     this.tableRows = data.table_data;
+                    this.tableTotalClasses = data.total_classes;
+                },
+
+                // NEW INLINE EDITOR LOGIC
+                async toggleCellAttendance(student, day) {
+                    let current = student.days[day];
+                    let nextStatus = '';
+                    let displayVal = '';
+                    
+                    if (current === 'P') {
+                        nextStatus = 'Absent';
+                        displayVal = 'A';
+                    } else if (current === 'A') {
+                        nextStatus = 'Clear';
+                        displayVal = '';
+                    } else {
+                        nextStatus = 'Present';
+                        displayVal = 'P';
+                    }
+
+                    // Update UI optimistically
+                    student.days[day] = displayVal;
+                    
+                    // Recalculate percentage for display
+                    let totalP = 0;
+                    for (let d = 1; d <= this.tableNumDays; d++) {
+                        if (student.days[d] === 'P') totalP++;
+                    }
+                    student.pct = this.tableTotalClasses > 0 ? Math.round((totalP / this.tableTotalClasses) * 100) : 0;
+
+                    // Format Date string
+                    let mIdx = this.months.indexOf(this.tableMonth) + 1;
+                    let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+                    // Call backend to save
+                    let formData = new FormData();
+                    formData.append('user_id', this.userId);
+                    formData.append('student_id', student.id);
+                    formData.append('subject', this.tableSubject);
+                    formData.append('date_str', dateStr);
+                    formData.append('status', nextStatus);
+
+                    try {
+                        let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        if (!res.ok) {
+                            let err = await res.json();
+                            alert("Error updating attendance: " + err.detail);
+                            this.loadTableData(); // Restore on error
+                        }
+                    } catch(e) {
+                        alert("Network error while updating attendance. Please check your connection.");
+                        this.loadTableData();
+                    }
                 },
 
                 async loadReportData() {
@@ -1286,7 +1436,7 @@ def home():
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
-                        alert("PDF Downloaded! You can now manually share it.");
+                        alert("PDF Downloaded successfully! You can now manually share the file.");
                     }
                 },
 
@@ -1303,7 +1453,8 @@ def home():
                     this.currentStudentPhoto = data.photo_data;
                 },
 
-                async markStatus(status) {
+                // ✅ FIX: Renamed this function for the "Mark Attendance" buttons
+                async markStatusBtn(status) {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', this.currentStudent.id);
@@ -1319,8 +1470,8 @@ def home():
                         }
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error saving attendance: " + err);
+                        let err = await res.json();
+                        alert("Error saving attendance: " + err.detail);
                     }
                 },
 
@@ -1354,12 +1505,13 @@ def home():
                     formData.append('name', this.newStudent.name);
                     let res = await fetch('/api/add_student', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('Student added successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.newStudent = { reg_no: '', roll_no: '', name: '' };
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error adding student: " + err);
+                        let err = await res.json();
+                        alert("Error adding student: " + err.detail);
                     }
                 },
 
@@ -1369,12 +1521,31 @@ def home():
                     formData.append('reg_no', this.delRegNo);
                     let res = await fetch('/api/delete_student', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('Student deleted successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.delRegNo = '';
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error deleting student: " + err);
+                        let err = await res.json();
+                        alert("Error deleting student: " + err.detail);
+                    }
+                },
+
+                // NEW: DELETE ALL STUDENTS FEATURE
+                async deleteAllStudents() {
+                    if (!confirm("WARNING: Are you entirely sure you want to delete ALL students and their attendance data? This action cannot be undone.")) return;
+                    
+                    let formData = new FormData();
+                    formData.append('user_id', this.userId);
+                    let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
+                    
+                    if (res.ok) {
+                        let data = await res.json();
+                        alert(data.message);
+                        this.loadData();
+                    } else {
+                        let err = await res.json();
+                        alert("Error deleting records: " + err.detail);
                     }
                 },
 
@@ -1390,8 +1561,8 @@ def home():
                         alert(data.message);
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert('Import failed: ' + err);
+                        let err = await res.json();
+                        alert('Import failed: ' + err.detail);
                     }
                 },
 
@@ -1409,8 +1580,8 @@ def home():
                         alert(data.message);
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error resetting data: " + err);
+                        let err = await res.json();
+                        alert("Error resetting data: " + err.detail);
                     }
                 },
 
@@ -1420,12 +1591,13 @@ def home():
                     formData.append('subject_name', this.newSubject);
                     let res = await fetch('/api/add_subject', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('Subject added successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.newSubject = '';
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error adding subject: " + err);
+                        let err = await res.json();
+                        alert("Error adding subject: " + err.detail);
                     }
                 },
 
@@ -1435,12 +1607,13 @@ def home():
                     formData.append('subject_name', this.delSubject);
                     let res = await fetch('/api/delete_subject', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('Subject deleted successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.delSubject = '';
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error deleting subject: " + err);
+                        let err = await res.json();
+                        alert("Error deleting subject: " + err.detail);
                     }
                 },
 
@@ -1454,10 +1627,10 @@ def home():
                     if (res.ok) {
                         let data = await res.json();
                         this.collegeLogo = data.logo_url;
-                        alert('Logo uploaded successfully!');
+                        alert(data.message);
                     } else {
-                        let err = await res.text();
-                        alert("Error uploading logo: " + err);
+                        let err = await res.json();
+                        alert("Error uploading logo: " + err.detail);
                     }
                 },
 
@@ -1470,16 +1643,17 @@ def home():
                     formData.append('section_name', this.sectionName);
                     let res = await fetch('/api/save_college_profile', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('College metadata updated successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.loadData();
                     } else {
-                        let err = await res.text();
-                        alert("Error saving profile: " + err);
+                        let err = await res.json();
+                        alert("Error saving profile: " + err.detail);
                     }
                 },
 
                 async saveStudentProfile() {
-                    if (!this.profileReg) { alert('Please select a student.'); return; }
+                    if (!this.profileReg) { alert('Please select a student first.'); return; }
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('reg_no', this.profileReg);
@@ -1496,11 +1670,12 @@ def home():
 
                     let res = await fetch('/api/save_student_profile', { method: 'POST', body: formData });
                     if (res.ok) {
-                        alert('Student profile & photo saved successfully!');
+                        let data = await res.json();
+                        alert(data.message);
                         this.fetchStudentDetails();
                     } else {
-                        let err = await res.text();
-                        alert("Error saving student profile: " + err);
+                        let err = await res.json();
+                        alert("Error saving student profile: " + err.detail);
                     }
                 },
 

@@ -6,10 +6,24 @@ import calendar
 from datetime import datetime, date
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy import create_engine, text
+from dateutil import parser
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
+
+# ✅ Serves the Manifest and Service Worker for PWA (App Install Feature)
+@app.get("/manifest.json")
+def get_manifest():
+    if os.path.exists("manifest.json"):
+        return FileResponse("manifest.json")
+    raise HTTPException(status_code=404, detail="manifest.json not found")
+
+@app.get("/sw.js")
+def get_sw():
+    if os.path.exists("sw.js"):
+        return FileResponse("sw.js", media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="sw.js not found")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -246,7 +260,7 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
         data = []
         for s in students:
             s_id, reg, roll, name = s
-            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
+            row = {"Sl No": roll, "Registration No": reg, "Student Name": name}
             total_p = 0
             for d in range(1, num_days + 1):
                 val = att_map.get(reg, {}).get(d, "")
@@ -336,7 +350,7 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
         data = []
         for st in students:
             st_id, reg, roll, name = st
-            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
+            row = {"Sl No": roll, "Reg No": reg, "Student Name": name}
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -562,7 +576,7 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
 
 
 # ==========================================
-# 1. NEW API: IMPORT ONLY STUDENTS
+# 1. API: IMPORT ONLY STUDENTS
 # ==========================================
 @app.post("/api/import_students")
 async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
@@ -660,9 +674,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
 
-        # ✅ FIXED: Smart Attendance Column Detection for Downloaded Tables
         try:
-            # Step 1: Check if the exact day number (e.g. '12') is a column
             target_day = str(int(date_str.split('-')[2]))
             if target_day in cols:
                 mapped_att = target_day
@@ -671,7 +683,6 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
         except:
             pass
             
-        # Step 2: Fallback if day number is not found
         if not mapped_att:
             for orig_col, clean_name in cleaned_cols.items():
                 if ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
@@ -680,7 +691,6 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                     
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
         
-        # Step 3: Last Resort (Pick the last column, but avoid "Overall %")
         if not mapped_att and len(cols) > 1: 
             if cols[-1] == 'Overall %' and len(cols) > 2:
                 mapped_att = cols[-2]
@@ -815,6 +825,15 @@ def home():
 <head>
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
+    <!-- ✅ Added PWA Tags Below -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js');
+        }
+    </script>
+    
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -1047,7 +1066,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (NEW EXCEL DOWNLOAD & INLINE CLICK EDITING) -->
+            <!-- TAB 3: ATTENDANCE TABLE -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1069,7 +1088,6 @@ def home():
                     </select>
                 </div>
                 
-                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
@@ -1096,7 +1114,6 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     
-                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"
@@ -1198,9 +1215,7 @@ def home():
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
                 
-                <!-- NEW: 2 SEPARATE BUTTONS FOR IMPORT -->
                 <div class="grid grid-cols-2 gap-6">
-                    <!-- OPTION 1: IMPORT STUDENTS ONLY -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
@@ -1209,7 +1224,6 @@ def home():
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
                     </div>
 
-                    <!-- OPTION 2: IMPORT ATTENDANCE -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
@@ -1267,7 +1281,6 @@ def home():
                         </form>
                     </div>
                     
-                    <!-- DANGER ZONE -->
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
                         <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>

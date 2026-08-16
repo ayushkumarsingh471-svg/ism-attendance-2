@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, text
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 # ==========================================
-# 🌟 ULTIMATE PWA SYSTEM (FIXED FOR DESKTOP) 🌟
+# 🌟 DUAL PWA SYSTEM (FAVICON + APP INSTALL) 🌟
 # ==========================================
 @app.get("/manifest.json")
 def get_manifest():
@@ -26,41 +26,48 @@ def get_manifest():
         "theme_color": "#1e3a8a",
         "icons": [
             {
-                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
+                "src": "/icon.png",
                 "sizes": "192x192",
                 "type": "image/png",
                 "purpose": "any"
             },
             {
-                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
+                "src": "/icon.png",
                 "sizes": "512x512",
                 "type": "image/png",
                 "purpose": "maskable"
-            },
-            {
-                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
-                "sizes": "any",
-                "type": "image/png",
-                "purpose": "any"
             }
         ]
     }
 
 @app.get("/sw.js")
 def get_sw():
-    # Cache version bumped to v15 to forcefully refresh laptop cache
     sw_code = """
-    const CACHE_NAME = 'ism-erp-v15';
+    const CACHE_NAME = 'ism-erp-v18';
     self.addEventListener('install', (e) => { self.skipWaiting(); });
     self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
     self.addEventListener('fetch', (e) => {
-        e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+        // Bypass cache for manifest and icon so they load fresh
+        if (e.request.url.includes('manifest.json') || e.request.url.includes('icon.png')) {
+            e.respondWith(fetch(e.request));
+        } else {
+            e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+        }
     });
     """
     return StreamingResponse(io.BytesIO(sw_code.encode('utf-8')), media_type="application/javascript")
 
 @app.get("/icon.png")
 def get_icon():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # यह कोड आपके फोल्डर में ISM.jpg को ढूंढेगा और ऐप के लोगो की तरह लगा देगा
+    possible_names = ["ISM.jpg", "ism.jpg", "icon.png", "tree-logo.png"]
+    for name in possible_names:
+        file_path = os.path.join(base_dir, name)
+        if os.path.exists(file_path):
+            return FileResponse(file_path)
+            
+    # अगर फाइल नहीं मिलती है, तो डायरेक्ट लिंक पर भेज देगा
     return RedirectResponse(url="https://i.ibb.co/3s68K1v/tree-logo.png")
 
 # ==========================================
@@ -863,14 +870,16 @@ def home():
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
     
-    <!-- ✅ Serverless PWA Tags - Cache Buster v11 added to force refresh on laptop -->
-    <link rel="manifest" href="/manifest.json?v=11">
+    <!-- ✅ Serverless PWA Tags (Reads from Python dynamically) -->
+    <link rel="manifest" href="/manifest.json?v=18">
+    
+    <!-- ✅ Direct Online URL for Browser Tab to ensure 100% visibility everywhere -->
     <link rel="icon" type="image/png" href="https://i.ibb.co/3s68K1v/tree-logo.png">
     <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
     <meta name="theme-color" content="#1e3a8a">
     <script>
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js');
+            navigator.serviceWorker.register('/sw.js?v=18');
         }
     </script>
     

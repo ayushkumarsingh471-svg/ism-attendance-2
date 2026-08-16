@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, text
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 # ==========================================
-# 🌟 ULTIMATE PWA SYSTEM (NO EXTERNAL FILES REQUIRED) 🌟
+# 🌟 ULTIMATE PWA SYSTEM (FIXED FOR DESKTOP) 🌟
 # ==========================================
 @app.get("/manifest.json")
 def get_manifest():
@@ -25,16 +25,32 @@ def get_manifest():
         "background_color": "#0f172a",
         "theme_color": "#1e3a8a",
         "icons": [
-            {"src": "/icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+            {
+                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "maskable"
+            },
+            {
+                "src": "https://i.ibb.co/3s68K1v/tree-logo.png",
+                "sizes": "any",
+                "type": "image/png",
+                "purpose": "any"
+            }
         ]
     }
 
 @app.get("/sw.js")
 def get_sw():
-    # Cache version changed to force browser to update icon
+    # Cache version bumped to v15 to forcefully refresh laptop cache
     sw_code = """
-    const CACHE_NAME = 'ism-erp-v10';
+    const CACHE_NAME = 'ism-erp-v15';
     self.addEventListener('install', (e) => { self.skipWaiting(); });
     self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
     self.addEventListener('fetch', (e) => {
@@ -45,12 +61,6 @@ def get_sw():
 
 @app.get("/icon.png")
 def get_icon():
-    # 1. Check if user uploaded ISM.jpg or icon.png directly to the server
-    for filename in ["ISM.jpg", "ism.jpg", "icon.png", "tree-logo.png"]:
-        if os.path.exists(filename):
-            return FileResponse(filename)
-    
-    # 2. If not found, use Bulletproof Redirect to Online Image (Never Fails)
     return RedirectResponse(url="https://i.ibb.co/3s68K1v/tree-logo.png")
 
 # ==========================================
@@ -850,14 +860,13 @@ def home():
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <!-- ✅ Mobile Viewport Tag Removed - Desktop Mode on Phone Restored! -->
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
     
-    <!-- ✅ PWA Tags (App Install Icon Support - Python Embedded) -->
-    <link rel="manifest" href="/manifest.json">
-    <link rel="icon" href="/icon.png">
-    <link rel="apple-touch-icon" href="/icon.png">
+    <!-- ✅ Serverless PWA Tags - Cache Buster v11 added to force refresh on laptop -->
+    <link rel="manifest" href="/manifest.json?v=11">
+    <link rel="icon" type="image/png" href="https://i.ibb.co/3s68K1v/tree-logo.png">
+    <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
     <meta name="theme-color" content="#1e3a8a">
     <script>
         if ('serviceWorker' in navigator) {
@@ -1097,7 +1106,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (INLINE CLICK EDITING) -->
+            <!-- TAB 3: ATTENDANCE TABLE -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1145,7 +1154,6 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     
-                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"

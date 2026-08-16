@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ism-erp-cache-v1';
+const CACHE_NAME = 'ism-erp-cache-v5';
 
 self.addEventListener('install', (event) => {
     self.skipWaiting();

@@ -12,25 +12,19 @@ from sqlalchemy import create_engine, text
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 # ==========================================
-# PWA (App Install) & ICON ROUTES
+# PWA FILES ROUTING (Reading from separate files)
 # ==========================================
 @app.get("/manifest.json")
 def get_manifest():
     if os.path.exists("manifest.json"):
         return FileResponse("manifest.json")
-    raise HTTPException(status_code=404, detail="manifest.json not found")
+    return {"error": "File not found"}
 
 @app.get("/sw.js")
 def get_sw():
     if os.path.exists("sw.js"):
         return FileResponse("sw.js", media_type="application/javascript")
-    raise HTTPException(status_code=404, detail="sw.js not found")
-
-@app.get("/icon.png")
-def get_icon():
-    if os.path.exists("icon.png"):
-        return FileResponse("icon.png", media_type="image/png")
-    raise HTTPException(status_code=404, detail="icon.png not found")
+    return {"error": "File not found"}
 
 # ==========================================
 # DATABASE CONNECTION
@@ -408,7 +402,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
-        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sid, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
         att_rows = conn.execute(text(f"SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} WHERE status='Present' AND date LIKE :d GROUP BY student_id, subject_id"), {"d": date_pattern}).fetchall()
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
@@ -586,9 +580,7 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-# ==========================================
-# 1. API: IMPORT ONLY STUDENTS (BUTTON 1)
-# ==========================================
+
 @app.post("/api/import_students")
 async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -653,9 +645,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
     except Exception as e:
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
 
-# ==========================================
-# 2. API: BULK IMPORT ATTENDANCE (BUTTON 2)
-# ==========================================
+
 @app.post("/api/import_attendance")
 async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -834,10 +824,9 @@ def home():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ISM Attendance ERP - Final Full Edition</title>
     
-    <!-- ✅ PWA Tags (App Install Icon Support) -->
+    <!-- ✅ Serverless PWA Tags for Vercel (Reads from 3 separate files) -->
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" href="/icon.png">
     <link rel="apple-touch-icon" href="/icon.png">
@@ -1080,7 +1069,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (NEW EXCEL DOWNLOAD & INLINE CLICK EDITING) -->
+            <!-- TAB 3: ATTENDANCE TABLE -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1102,7 +1091,6 @@ def home():
                     </select>
                 </div>
                 
-                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
@@ -1129,7 +1117,6 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     
-                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"
@@ -1231,9 +1218,7 @@ def home():
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
                 
-                <!-- NEW: 2 SEPARATE BUTTONS FOR IMPORT -->
                 <div class="grid grid-cols-2 gap-6">
-                    <!-- OPTION 1: IMPORT STUDENTS ONLY -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
@@ -1242,7 +1227,6 @@ def home():
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
                     </div>
 
-                    <!-- OPTION 2: IMPORT ATTENDANCE -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
@@ -1300,7 +1284,6 @@ def home():
                         </form>
                     </div>
                     
-                    <!-- DANGER ZONE -->
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
                         <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>

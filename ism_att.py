@@ -6,25 +6,52 @@ import calendar
 from datetime import datetime, date
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, RedirectResponse
 from sqlalchemy import create_engine, text
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 # ==========================================
-# PWA FILES ROUTING (Reading from separate files)
+# 🌟 ULTIMATE PWA SYSTEM (NO EXTERNAL FILES REQUIRED) 🌟
 # ==========================================
 @app.get("/manifest.json")
 def get_manifest():
-    if os.path.exists("manifest.json"):
-        return FileResponse("manifest.json")
-    return {"error": "File not found"}
+    return {
+        "name": "ISM Attendance ERP",
+        "short_name": "ISM ERP",
+        "description": "Attendance Management System for ISM Patna",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#1e3a8a",
+        "icons": [
+            {"src": "/icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ]
+    }
 
 @app.get("/sw.js")
 def get_sw():
-    if os.path.exists("sw.js"):
-        return FileResponse("sw.js", media_type="application/javascript")
-    return {"error": "File not found"}
+    # Cache version changed to force browser to update icon
+    sw_code = """
+    const CACHE_NAME = 'ism-erp-v10';
+    self.addEventListener('install', (e) => { self.skipWaiting(); });
+    self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
+    self.addEventListener('fetch', (e) => {
+        e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    });
+    """
+    return StreamingResponse(io.BytesIO(sw_code.encode('utf-8')), media_type="application/javascript")
+
+@app.get("/icon.png")
+def get_icon():
+    # 1. Check if user uploaded ISM.jpg or icon.png directly to the server
+    for filename in ["ISM.jpg", "ism.jpg", "icon.png", "tree-logo.png"]:
+        if os.path.exists(filename):
+            return FileResponse(filename)
+    
+    # 2. If not found, use Bulletproof Redirect to Online Image (Never Fails)
+    return RedirectResponse(url="https://i.ibb.co/3s68K1v/tree-logo.png")
 
 # ==========================================
 # DATABASE CONNECTION
@@ -409,7 +436,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
         college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
 
-        headers = ["Sl No", "Reg No", "Name"] + subjects + ["Overall %"]
+        headers = ["Roll No", "Reg No", "Name"] + subjects + ["Overall %"]
         table_data = [headers]
 
         for st in students:
@@ -823,10 +850,11 @@ def home():
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!-- ✅ Mobile Viewport Tag Removed - Desktop Mode on Phone Restored! -->
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
     
-    <!-- ✅ Serverless PWA Tags for Vercel (Reads from 3 separate files) -->
+    <!-- ✅ PWA Tags (App Install Icon Support - Python Embedded) -->
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" href="/icon.png">
     <link rel="apple-touch-icon" href="/icon.png">
@@ -1069,7 +1097,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE -->
+            <!-- TAB 3: ATTENDANCE TABLE (INLINE CLICK EDITING) -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1117,6 +1145,7 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     
+                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"

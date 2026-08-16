@@ -6,73 +6,11 @@ import calendar
 from datetime import datetime, date
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
-# ==========================================
-# 🌟 DUAL PWA SYSTEM (FAVICON + APP INSTALL) 🌟
-# ==========================================
-@app.get("/manifest.json")
-def get_manifest():
-    return {
-        "name": "ISM Attendance ERP",
-        "short_name": "ISM ERP",
-        "description": "Attendance Management System for ISM Patna",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#0f172a",
-        "theme_color": "#1e3a8a",
-        "icons": [
-            {
-                "src": "/icon.png",
-                "sizes": "192x192",
-                "type": "image/png",
-                "purpose": "any"
-            },
-            {
-                "src": "/icon.png",
-                "sizes": "512x512",
-                "type": "image/png",
-                "purpose": "maskable"
-            }
-        ]
-    }
-
-@app.get("/sw.js")
-def get_sw():
-    sw_code = """
-    const CACHE_NAME = 'ism-erp-v18';
-    self.addEventListener('install', (e) => { self.skipWaiting(); });
-    self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
-    self.addEventListener('fetch', (e) => {
-        // Bypass cache for manifest and icon so they load fresh
-        if (e.request.url.includes('manifest.json') || e.request.url.includes('icon.png')) {
-            e.respondWith(fetch(e.request));
-        } else {
-            e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
-        }
-    });
-    """
-    return StreamingResponse(io.BytesIO(sw_code.encode('utf-8')), media_type="application/javascript")
-
-@app.get("/icon.png")
-def get_icon():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    # यह कोड आपके फोल्डर में ISM.jpg को ढूंढेगा और ऐप के लोगो की तरह लगा देगा
-    possible_names = ["ISM.jpg", "ism.jpg", "icon.png", "tree-logo.png"]
-    for name in possible_names:
-        file_path = os.path.join(base_dir, name)
-        if os.path.exists(file_path):
-            return FileResponse(file_path)
-            
-    # अगर फाइल नहीं मिलती है, तो डायरेक्ट लिंक पर भेज देगा
-    return RedirectResponse(url="https://i.ibb.co/3s68K1v/tree-logo.png")
-
-# ==========================================
-# DATABASE CONNECTION
-# ==========================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     try:
@@ -144,9 +82,7 @@ def init_tenant_db(user_id):
             for sub in ['SAD', 'PST&PC', 'NT', 'BE', 'OS&UNIX LAB', 'PROG IN C LAB']:
                 conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:sub) ON CONFLICT DO NOTHING"), {"sub": sub})
 
-# ==========================================
-# API ENDPOINTS
-# ==========================================
+# --- API ENDPOINTS ---
 
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
@@ -310,7 +246,7 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
         data = []
         for s in students:
             s_id, reg, roll, name = s
-            row = {"Sl No": roll, "Registration No": reg, "Student Name": name}
+            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             total_p = 0
             for d in range(1, num_days + 1):
                 val = att_map.get(reg, {}).get(d, "")
@@ -400,7 +336,7 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
         data = []
         for st in students:
             st_id, reg, roll, name = st
-            row = {"Sl No": roll, "Reg No": reg, "Student Name": name}
+            row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -446,7 +382,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
-        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sid, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
         att_rows = conn.execute(text(f"SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} WHERE status='Present' AND date LIKE :d GROUP BY student_id, subject_id"), {"d": date_pattern}).fetchall()
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
@@ -625,6 +561,9 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 
+# ==========================================
+# 1. NEW API: IMPORT ONLY STUDENTS
+# ==========================================
 @app.post("/api/import_students")
 async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -690,6 +629,9 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
 
 
+# ==========================================
+# 2. API: BULK IMPORT ATTENDANCE (SMART DATE DETECT FIX)
+# ==========================================
 @app.post("/api/import_attendance")
 async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -718,7 +660,9 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
 
+        # ✅ FIXED: Smart Attendance Column Detection for Downloaded Tables
         try:
+            # Step 1: Check if the exact day number (e.g. '12') is a column
             target_day = str(int(date_str.split('-')[2]))
             if target_day in cols:
                 mapped_att = target_day
@@ -727,6 +671,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
         except:
             pass
             
+        # Step 2: Fallback if day number is not found
         if not mapped_att:
             for orig_col, clean_name in cleaned_cols.items():
                 if ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
@@ -735,6 +680,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                     
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
         
+        # Step 3: Last Resort (Pick the last column, but avoid "Overall %")
         if not mapped_att and len(cols) > 1: 
             if cols[-1] == 'Overall %' and len(cols) > 2:
                 mapped_att = cols[-2]
@@ -869,20 +815,6 @@ def home():
 <head>
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
-    
-    <!-- ✅ Serverless PWA Tags (Reads from Python dynamically) -->
-    <link rel="manifest" href="/manifest.json?v=18">
-    
-    <!-- ✅ Direct Online URL for Browser Tab to ensure 100% visibility everywhere -->
-    <link rel="icon" type="image/png" href="https://i.ibb.co/3s68K1v/tree-logo.png">
-    <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
-    <meta name="theme-color" content="#1e3a8a">
-    <script>
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js?v=18');
-        }
-    </script>
-    
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -1115,7 +1047,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE -->
+            <!-- TAB 3: ATTENDANCE TABLE (NEW EXCEL DOWNLOAD & INLINE CLICK EDITING) -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1137,6 +1069,7 @@ def home():
                     </select>
                 </div>
                 
+                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
@@ -1163,6 +1096,7 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     
+                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"
@@ -1264,7 +1198,9 @@ def home():
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
                 
+                <!-- NEW: 2 SEPARATE BUTTONS FOR IMPORT -->
                 <div class="grid grid-cols-2 gap-6">
+                    <!-- OPTION 1: IMPORT STUDENTS ONLY -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
@@ -1273,6 +1209,7 @@ def home():
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
                     </div>
 
+                    <!-- OPTION 2: IMPORT ATTENDANCE -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
@@ -1330,6 +1267,7 @@ def home():
                         </form>
                     </div>
                     
+                    <!-- DANGER ZONE -->
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
                         <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>

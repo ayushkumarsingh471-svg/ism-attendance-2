@@ -6,3 +6,4 @@ pandas
 openpyxl
 reportlab
 python-multipart
+python-dateutil

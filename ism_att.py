@@ -561,9 +561,6 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 
-# ==========================================
-# 1. NEW API: IMPORT ONLY STUDENTS
-# ==========================================
 @app.post("/api/import_students")
 async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -629,9 +626,6 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
 
 
-# ==========================================
-# 2. API: BULK IMPORT ATTENDANCE (SMART DATE DETECT FIX)
-# ==========================================
 @app.post("/api/import_attendance")
 async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
     safe_uid = get_safe_prefix(user_id)
@@ -660,9 +654,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
 
-        # ✅ FIXED: Smart Attendance Column Detection for Downloaded Tables
         try:
-            # Step 1: Check if the exact day number (e.g. '12') is a column
             target_day = str(int(date_str.split('-')[2]))
             if target_day in cols:
                 mapped_att = target_day
@@ -671,7 +663,6 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
         except:
             pass
             
-        # Step 2: Fallback if day number is not found
         if not mapped_att:
             for orig_col, clean_name in cleaned_cols.items():
                 if ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
@@ -680,7 +671,6 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                     
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
         
-        # Step 3: Last Resort (Pick the last column, but avoid "Overall %")
         if not mapped_att and len(cols) > 1: 
             if cols[-1] == 'Overall %' and len(cols) > 2:
                 mapped_att = cols[-2]
@@ -1136,6 +1126,11 @@ def home():
                     
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
+
+                <!-- NEW: SEARCH BAR FOR COMPILE REPORT -->
+                <div class="mb-6">
+                    <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
+                </div>
                 
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center">
@@ -1151,7 +1146,8 @@ def home():
                             </tr>
                         </thead>
                         <tbody>
-                            <template x-for="st in reportRows">
+                            <!-- CHANGED from reportRows to filteredReportRows -->
+                            <template x-for="st in filteredReportRows">
                                 <tr class="border-b bg-sky-50">
                                     <td class="p-3 border" x-text="st.reg_no"></td>
                                     <td class="p-3 border" x-text="st.roll_no"></td>
@@ -1394,6 +1390,7 @@ def home():
                 reportYear: curYear,
                 reportSubjects: [],
                 reportRows: [],
+                reportSearchQuery: '',
 
                 resetScope: 'single',
                 resetReg: '',
@@ -1537,34 +1534,21 @@ def home():
                     this.reportRows = data.report;
                 },
 
-                async shareViaEmail() {
-                    let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
-                    let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
-                    
-                    try {
-                        let response = await fetch(pdfUrl);
-                        let blob = await response.blob();
-                        let file = new File([blob], fileName, {type: "application/pdf"});
-                        
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ files: [file] });
-                            return; 
-                        } else {
-                            throw new Error("Sharing not supported");
-                        }
-                    } catch(e) {
-                        let a = document.createElement('a');
-                        a.href = pdfUrl;
-                        a.download = fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        alert("PDF Downloaded successfully! You can now manually share the file.");
-                    }
-                },
-
                 get currentStudent() {
                     return this.students[this.currentIndex] || { name: '', reg_no: '', roll_no: '' };
+                },
+
+                // NEW: FILTER COMPUTED PROPERTY FOR SEARCH
+                get filteredReportRows() {
+                    if (this.reportSearchQuery.trim() === '') {
+                        return this.reportRows;
+                    }
+                    let q = this.reportSearchQuery.toLowerCase();
+                    return this.reportRows.filter(st => 
+                        (st.name && st.name.toLowerCase().includes(q)) || 
+                        (st.reg_no && st.reg_no.toLowerCase().includes(q)) ||
+                        (st.roll_no && String(st.roll_no).toLowerCase().includes(q))
+                    );
                 },
 
                 async fetchStudentDetails() {
@@ -1822,6 +1806,32 @@ def home():
                     } else {
                         let err = await res.json();
                         alert("Error saving student profile: " + err.detail);
+                    }
+                },
+
+                async shareViaEmail() {
+                    let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
+                    let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
+                    
+                    try {
+                        let response = await fetch(pdfUrl);
+                        let blob = await response.blob();
+                        let file = new File([blob], fileName, {type: "application/pdf"});
+                        
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            await navigator.share({ files: [file] });
+                            return; 
+                        } else {
+                            throw new Error("Sharing not supported");
+                        }
+                    } catch(e) {
+                        let a = document.createElement('a');
+                        a.href = pdfUrl;
+                        a.download = fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        alert("PDF Downloaded successfully! You can now manually share the file.");
                     }
                 },
 

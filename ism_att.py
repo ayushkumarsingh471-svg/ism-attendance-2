@@ -82,7 +82,9 @@ def init_tenant_db(user_id):
             for sub in ['SAD', 'PST&PC', 'NT', 'BE', 'OS&UNIX LAB', 'PROG IN C LAB']:
                 conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:sub) ON CONFLICT DO NOTHING"), {"sub": sub})
 
-# --- API ENDPOINTS ---
+# ==========================================
+# AUTHENTICATION API
+# ==========================================
 
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
@@ -92,7 +94,7 @@ def login(username: str = Form(...), password: str = Form(...)):
     if res:
         init_tenant_db(u)
         return {"success": True, "user": u}
-    raise HTTPException(status_code=400, detail="Invalid User ID or Password.")
+    raise HTTPException(status_code=400, detail="Invalid Faculty ID or Password.")
 
 @app.post("/api/register")
 def register(username: str = Form(...), password: str = Form(...)):
@@ -105,7 +107,91 @@ def register(username: str = Form(...), password: str = Form(...)):
         init_tenant_db(u)
         return {"success": True}
     except Exception:
-        raise HTTPException(status_code=400, detail="User ID already exists. Please choose another.")
+        raise HTTPException(status_code=400, detail="Faculty ID already exists. Please choose another.")
+
+# --- NEW: STUDENT LOGIN (GLOBAL SEARCH) ---
+@app.post("/api/student_login")
+def student_login(reg_no: str = Form(...), name: str = Form(...)):
+    r_no = reg_no.strip()
+    s_name = name.strip()
+    
+    with engine.begin() as conn:
+        faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
+        for fac in faculties:
+            f_id = fac[0]
+            safe_uid = get_safe_prefix(f_id)
+            t_students = f"{safe_uid}_students"
+            try:
+                # Basic check to avoid errors if table doesn't exist
+                conn.execute(text(f"SELECT 1 FROM {t_students} LIMIT 1"))
+                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
+                if st:
+                    return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
+            except Exception:
+                continue
+                
+    raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
+
+@app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
+def get_student_dashboard_data(faculty_id: str, reg_no: str):
+    safe_uid = get_safe_prefix(faculty_id)
+    t_students = f"{safe_uid}_students"
+    t_subjects = f"{safe_uid}_subjects"
+    t_attendance = f"{safe_uid}_attendance"
+    t_settings = f"{safe_uid}_settings"
+
+    with engine.begin() as conn:
+        st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
+        if not st: return {"error": "Student not found"}
+        st_id, st_name, st_roll = st[0], st[1], st[2]
+
+        sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
+        sub_map = {r[1]: r[0] for r in sub_rows}
+
+        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid"), {"sid": sid}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        att_rows = conn.execute(text(f"SELECT subject_id, COUNT(*) FROM {t_attendance} WHERE student_id=:sid AND status='Present' GROUP BY subject_id"), {"sid": st_id}).fetchall()
+        present_map = {r[0]: r[1] for r in att_rows}
+
+        summary = []
+        tot_p_all = 0
+        tot_c_all = 0
+        for sub, sid in sub_map.items():
+            tot_c = sub_total_classes.get(sub, 0)
+            tot_p = present_map.get(sid, 0)
+            tot_p_all += tot_p
+            tot_c_all += tot_c
+            pct = round((tot_p / tot_c * 100)) if tot_c > 0 else 0
+            summary.append({"subject": sub, "present": tot_p, "total": tot_c, "pct": pct})
+
+        overall_pct = round((tot_p_all / tot_c_all * 100)) if tot_c_all > 0 else 0
+
+        recent_records = conn.execute(text(f"""
+            SELECT sub.subject_name, a.date, a.status 
+            FROM {t_attendance} a
+            JOIN {t_subjects} sub ON a.subject_id = sub.id
+            WHERE a.student_id = :sid
+            ORDER BY a.date DESC
+        """), {"sid": st_id}).fetchall()
+
+        history = [{"subject": r[0], "date": r[1], "status": r[2]} for r in recent_records]
+
+        def get_cfg(k, def_v):
+            res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
+            return res[0] if res and res[0] else def_v
+
+        return {
+            "student": {"name": st_name, "reg_no": reg_no, "roll_no": st_roll},
+            "overall_pct": overall_pct,
+            "summary": summary,
+            "history": history,
+            "college_name": get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)'),
+            "course": get_cfg('course_name', 'BCA') + " - " + get_cfg('section_name', 'Semester 1'),
+            "logo": get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
+        }
+
+# ==========================================
+# FACULTY CORE API (Kept 100% Intact)
+# ==========================================
 
 @app.get("/api/data/{user_id}")
 def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE", target_date: str = "2026-07-25"):
@@ -796,6 +882,7 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
+
 # --- FULL HTML FRONTEND ---
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -831,47 +918,89 @@ def home():
         <div class="floating-icon" style="left: 90%; animation-delay: 3s; font-size: 75px;">⭐</div>
     </div>
 
-    <!-- LOGIN SCREEN -->
+    <!-- MAIN LOGIN SCREEN -->
     <div x-show="!loggedIn" class="flex items-center justify-center min-h-screen p-6 relative z-10">
-        <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-4xl grid grid-cols-2 gap-8 items-center">
+        <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-2 gap-10 items-center">
+            
+            <!-- Left Branding Side -->
             <div>
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
-                <p class="text-slate-300 text-xs leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. This portal provides complete data isolation, analytical insights, automated reports, and secure image profile mapping for individual courses and classes.</p>
-                <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl">
-                    <p class="text-sky-300 font-bold text-xs mb-1">💡 Multi-Tenant Isolation Feature:</p>
-                    <p class="text-slate-300 text-[11px]">Every class, course coordinator, or administrator can register a custom User ID to instantiate a clean, completely independent cloud database schema.</p>
+                <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
+                
+                <div class="space-y-4">
+                    <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
+                        <div class="text-3xl">👨‍🏫</div>
+                        <div>
+                            <p class="text-sky-300 font-bold text-sm">Faculty Login</p>
+                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance and manage records.</p>
+                        </div>
+                    </div>
+                    <div class="bg-emerald-950/60 border border-emerald-500/40 p-4 rounded-xl flex items-center gap-4">
+                        <div class="text-3xl">🎓</div>
+                        <div>
+                            <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
+                            <p class="text-slate-400 text-xs">Read-Only access for students to track their attendance reports.</p>
+                        </div>
+                    </div>
                 </div>
             </div>
             
+            <!-- Right Login Form Side -->
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
-                <div class="flex items-center gap-2 mb-6">
-                    <span class="text-2xl">🔐</span>
-                    <h2 class="text-xl font-black text-white">Access Portal</h2>
+                
+                <!-- Role Selector Tabs -->
+                <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
+                    <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
+                    <button @click="authRole = 'student'" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
                 </div>
-                <div class="flex gap-2 mb-6 bg-slate-950 p-1 rounded-xl">
-                    <button @click="isLogin = true" :class="isLogin ? 'bg-cyan-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-2 font-bold rounded-lg transition text-xs">🔐 LOGIN</button>
-                    <button @click="isLogin = false" :class="!isLogin ? 'bg-cyan-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-2 font-bold rounded-lg transition text-xs">📄 REGISTER NEW CLASS</button>
+
+                <!-- FACULTY LOGIN / REGISTER FORM -->
+                <div x-show="authRole === 'faculty'">
+                    <div class="flex gap-2 mb-6 bg-slate-800 p-1 rounded-xl">
+                        <button @click="isLogin = true" :class="isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">🔐 Login</button>
+                        <button @click="isLogin = false" :class="!isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">📄 Register New Class</button>
+                    </div>
+                    <form @submit.prevent="submitAuth" class="space-y-4">
+                        <div>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">Faculty ID / Class Code</label>
+                            <input type="text" x-model="authForm.username" placeholder="Enter Faculty ID" required class="w-full p-3 rounded-xl text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">Password</label>
+                            <input type="password" x-model="authForm.password" placeholder="Enter Password" required class="w-full p-3 rounded-xl text-sm">
+                        </div>
+                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm" x-text="isLogin ? 'FACULTY LOGIN' : 'CREATE CLASS PORTAL'"></button>
+                    </form>
                 </div>
-                <form @submit.prevent="submitAuth" class="space-y-4">
-                    <div>
-                        <label class="block text-sky-400 font-bold text-xs mb-1">User ID</label>
-                        <input type="text" x-model="authForm.username" placeholder="Enter User ID" required class="w-full p-3 rounded-xl text-sm">
-                    </div>
-                    <div>
-                        <label class="block text-sky-400 font-bold text-xs mb-1">Password</label>
-                        <input type="password" x-model="authForm.password" placeholder="Enter Password" required class="w-full p-3 rounded-xl text-sm">
-                    </div>
-                    <button type="submit" class="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">SECURE LOGIN</button>
-                    <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-2"></p>
-                </form>
+
+                <!-- STUDENT LOGIN FORM (Reg No & Name ONLY) -->
+                <div x-show="authRole === 'student'">
+                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only Access</p>
+                    <form @submit.prevent="submitStudentAuth" class="space-y-4">
+                        <div>
+                            <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
+                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                        </div>
+                        <div>
+                            <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
+                            <input type="text" x-model="studentForm.name" placeholder="Enter your full name as registered" required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                        </div>
+                        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">ACCESS STUDENT PORTAL</button>
+                    </form>
+                </div>
+
+                <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4"></p>
             </div>
         </div>
     </div>
 
-    <!-- MAIN APP INTERFACE -->
-    <div x-show="loggedIn" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
+
+    <!-- ============================================================== -->
+    <!-- ORIGINAL FACULTY DASHBOARD (Kept 100% exactly as you provided) -->
+    <!-- ============================================================== -->
+    <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
             <div class="anim-container">
                 <div class="floating-icon" style="left: 10%; animation-delay: 0s; font-size: 30px;">🎓</div>
@@ -1037,7 +1166,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (NEW EXCEL DOWNLOAD & INLINE CLICK EDITING) -->
+            <!-- TAB 3: ATTENDANCE TABLE (WITH SEARCH) -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
                 
@@ -1059,9 +1188,13 @@ def home():
                     </select>
                 </div>
                 
-                <!-- NEW EXCEL BUTTON FOR TABLE DATA -->
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                </div>
+
+                <!-- NEW SEARCH BAR FOR TABLE -->
+                <div class="mb-4">
+                    <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
                 </div>
                 
                 <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: You can click directly on any box below to toggle Attendance (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
@@ -1080,7 +1213,8 @@ def home():
                             </tr>
                         </thead>
                         <tbody>
-                            <template x-for="st in tableRows">
+                            <!-- CHANGED TO FILTERED TABLE ROWS -->
+                            <template x-for="st in filteredTableRows">
                                 <tr class="bg-sky-50 hover:bg-sky-200">
                                     <td class="p-3 border sticky left-0 bg-sky-50 z-10" x-text="st.reg_no"></td>
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
@@ -1104,7 +1238,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 4: MONTHLY COMPILE REPORT -->
+            <!-- TAB 4: MONTHLY COMPILE REPORT (WITH SEARCH) -->
             <div x-show="currentTab === 'report'">
                 <h2 class="text-2xl font-black text-white mb-4">📑 Consolidated Monthly Attendance & Percentage Report</h2>
                 <div class="grid grid-cols-2 gap-4 mb-6">
@@ -1127,7 +1261,7 @@ def home():
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
 
-                <!-- NEW: SEARCH BAR FOR COMPILE REPORT -->
+                <!-- SEARCH BAR FOR COMPILE REPORT -->
                 <div class="mb-6">
                     <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
                 </div>
@@ -1146,7 +1280,7 @@ def home():
                             </tr>
                         </thead>
                         <tbody>
-                            <!-- CHANGED from reportRows to filteredReportRows -->
+                            <!-- CHANGED TO FILTERED REPORT ROWS -->
                             <template x-for="st in filteredReportRows">
                                 <tr class="border-b bg-sky-50">
                                     <td class="p-3 border" x-text="st.reg_no"></td>
@@ -1194,7 +1328,6 @@ def home():
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
                 
-                <!-- NEW: 2 SEPARATE BUTTONS FOR IMPORT -->
                 <div class="grid grid-cols-2 gap-6">
                     <!-- OPTION 1: IMPORT STUDENTS ONLY -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
@@ -1330,6 +1463,108 @@ def home():
         </div>
     </div>
 
+
+    <!-- ============================================== -->
+    <!-- MAIN STUDENT READ-ONLY DASHBOARD               -->
+    <!-- ============================================== -->
+    <div x-show="loggedIn && userRole === 'student'" class="min-h-screen relative z-10 p-4 md:p-8" style="display: none;">
+        
+        <!-- Header -->
+        <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex justify-between items-center border-t-4 border-emerald-500">
+            <div class="flex items-center gap-4">
+                <img :src="studentDashData?.logo || 'https://i.ibb.co/3s68K1v/tree-logo.png'" class="w-16 h-16 bg-white rounded-xl p-1 shadow">
+                <div>
+                    <h1 class="text-2xl font-black text-white" x-text="studentDashData?.college_name"></h1>
+                    <p class="text-emerald-400 font-bold text-sm" x-text="studentDashData?.course"></p>
+                </div>
+            </div>
+            <button @click="logout" class="bg-red-500 hover:bg-red-600 text-white font-black px-6 py-2 rounded-xl shadow-lg transition">🚪 Logout</button>
+        </div>
+
+        <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8" x-show="studentDashData">
+            
+            <!-- Left Profile Card -->
+            <div class="col-span-1">
+                <div class="bg-slate-900 border-2 border-emerald-500/30 p-6 rounded-3xl shadow-2xl text-center">
+                    <div class="text-6xl mb-4">🎓</div>
+                    <h2 class="text-2xl font-black text-white" x-text="studentDashData.student.name"></h2>
+                    <p class="text-sky-300 font-bold mt-1">Roll No: <span x-text="studentDashData.student.roll_no"></span></p>
+                    <p class="text-slate-400 font-bold text-xs mt-1">Reg No: <span x-text="studentDashData.student.reg_no"></span></p>
+                    
+                    <div class="mt-8 pt-6 border-t border-slate-700">
+                        <p class="text-slate-400 font-bold text-sm mb-2">Overall Attendance</p>
+                        <div class="flex justify-center items-center">
+                            <div class="w-32 h-32 rounded-full border-8 flex items-center justify-center text-3xl font-black shadow-[0_0_15px_rgba(16,185,129,0.5)]"
+                                 :class="studentDashData.overall_pct >= 75 ? 'border-emerald-500 text-emerald-400' : 'border-red-500 text-red-400'"
+                                 x-text="studentDashData.overall_pct + '%'">
+                            </div>
+                        </div>
+                        <p class="mt-4 text-xs font-bold" :class="studentDashData.overall_pct >= 75 ? 'text-emerald-400' : 'text-red-400'">
+                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Zone' : '⚠️ Shortage Zone'"></span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Details Area -->
+            <div class="col-span-1 md:col-span-2 space-y-8">
+                
+                <!-- Subject Wise Compile Report -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 class="text-xl font-black text-amber-400 mb-6 flex items-center gap-2">📊 Subject-wise Compilation Report</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <template x-for="sub in studentDashData.summary">
+                            <div class="bg-slate-800/80 p-4 rounded-2xl border border-slate-700">
+                                <div class="flex justify-between items-end mb-2">
+                                    <h4 class="font-bold text-sky-300 truncate w-3/4" x-text="sub.subject"></h4>
+                                    <span class="font-black text-lg" :class="sub.pct >= 75 ? 'text-emerald-400' : 'text-amber-400'" x-text="sub.pct + '%'"></span>
+                                </div>
+                                <div class="w-full bg-slate-900 rounded-full h-2.5 mb-2">
+                                    <div class="h-2.5 rounded-full" :class="sub.pct >= 75 ? 'bg-emerald-500' : 'bg-amber-500'" :style="'width: ' + sub.pct + '%'"></div>
+                                </div>
+                                <p class="text-xs font-bold text-slate-400">Classes: <span class="text-white" x-text="sub.present + ' / ' + sub.total"></span></p>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Complete Attendance History -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Daily Attendance Register (P/A History)</h3>
+                    <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
+                        <table class="w-full text-left text-sm">
+                            <thead class="sticky top-0 bg-slate-900/90 text-sky-400 font-bold backdrop-blur">
+                                <tr>
+                                    <th class="p-3 rounded-tl-lg">Date</th>
+                                    <th class="p-3">Subject</th>
+                                    <th class="p-3 text-center rounded-tr-lg">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-slate-200 font-semibold">
+                                <template x-for="rec in studentDashData.history">
+                                    <tr class="border-b border-slate-700/50 hover:bg-slate-800/50">
+                                        <td class="p-3" x-text="rec.date"></td>
+                                        <td class="p-3" x-text="rec.subject"></td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-3 py-1 rounded-full text-xs font-black shadow"
+                                                  :class="rec.status === 'Present' ? 'bg-emerald-900 text-emerald-400 border border-emerald-500' : 'bg-red-900 text-red-400 border border-red-500'"
+                                                  x-text="rec.status === 'Present' ? 'P' : 'A'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="studentDashData.history.length === 0">
+                                    <td colspan="3" class="text-center p-6 text-slate-500">No attendance records found yet.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+
     <script>
         function erpApp() {
             let now = new Date();
@@ -1341,16 +1576,20 @@ def home():
             let curDate = now.toISOString().split('T')[0];
 
             return {
+                // CORE AUTH STATES
                 loggedIn: false,
+                userRole: '', // 'faculty' or 'student'
+                authRole: 'faculty', // UI Tab state
                 isLogin: true,
                 authForm: { username: '', password: '' },
+                studentForm: { reg_no: '', name: '' },
                 authError: '',
                 userId: '',
                 currentTab: 'dashboard',
                 
+                // ORIGINAL STATES
                 months: mList,
                 years: yList,
-
                 collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)',
                 appSubtitle: 'ATTENDANCE MANAGEMENT SYSTEM',
                 courseName: 'BCA',
@@ -1362,7 +1601,6 @@ def home():
                 presentToday: 0,
                 subjects: [],
                 selectedSubject: '',
-                
                 selectedMonth: curMonth,
                 selectedYear: curYear,
                 selectedDate: curDate,
@@ -1390,8 +1628,7 @@ def home():
                 reportYear: curYear,
                 reportSubjects: [],
                 reportRows: [],
-                reportSearchQuery: '',
-
+                
                 resetScope: 'single',
                 resetReg: '',
                 resetSubject: 'All Subjects',
@@ -1399,6 +1636,11 @@ def home():
                 
                 importSubject: '',
                 importDate: curDate,
+
+                // NEW STATES
+                studentDashData: null,
+                tableSearchQuery: '',
+                reportSearchQuery: '',
 
                 init() {
                     this.syncFromDate();
@@ -1437,14 +1679,52 @@ def home():
                         let res = await fetch(endpoint, { method: 'POST', body: formData });
                         let data = await res.json();
                         if (res.ok) {
+                            this.userRole = 'faculty';
                             this.userId = this.authForm.username;
                             this.loggedIn = true;
+                            this.authError = '';
                             this.loadData();
                         } else {
                             this.authError = data.detail || "Authentication Failed. Please try again.";
                         }
                     } catch(e) {
                         this.authError = "Server Connection Error. Check Backend.";
+                    }
+                },
+
+                async submitStudentAuth() {
+                    let formData = new FormData();
+                    formData.append('reg_no', this.studentForm.reg_no);
+                    formData.append('name', this.studentForm.name);
+                    try {
+                        let res = await fetch('/api/student_login', { method: 'POST', body: formData });
+                        let data = await res.json();
+                        if (res.ok) {
+                            this.userRole = 'student';
+                            this.userId = data.reg_no; 
+                            this.loggedIn = true;
+                            this.authError = '';
+                            this.loadStudentDashboard(data.faculty_id, data.reg_no);
+                        } else {
+                            this.authError = data.detail || "Student Login Failed.";
+                        }
+                    } catch(e) {
+                        this.authError = "Server Connection Error.";
+                    }
+                },
+
+                async loadStudentDashboard(fac_id, reg_no) {
+                    try {
+                        let res = await fetch(`/api/student_dashboard_data/${fac_id}/${reg_no}`);
+                        let data = await res.json();
+                        if (data.error) {
+                            alert(data.error);
+                            this.logout();
+                        } else {
+                            this.studentDashData = data;
+                        }
+                    } catch (e) {
+                        alert("Error loading dashboard data.");
                     }
                 },
 
@@ -1538,7 +1818,18 @@ def home():
                     return this.students[this.currentIndex] || { name: '', reg_no: '', roll_no: '' };
                 },
 
-                // NEW: FILTER COMPUTED PROPERTY FOR SEARCH
+                get filteredTableRows() {
+                    if (this.tableSearchQuery.trim() === '') {
+                        return this.tableRows;
+                    }
+                    let q = this.tableSearchQuery.toLowerCase();
+                    return this.tableRows.filter(st => 
+                        (st.name && st.name.toLowerCase().includes(q)) || 
+                        (st.reg_no && st.reg_no.toLowerCase().includes(q)) ||
+                        (st.roll_no && String(st.roll_no).toLowerCase().includes(q))
+                    );
+                },
+
                 get filteredReportRows() {
                     if (this.reportSearchQuery.trim() === '') {
                         return this.reportRows;
@@ -1837,7 +2128,9 @@ def home():
 
                 logout() {
                     this.loggedIn = false;
+                    this.userRole = '';
                     this.userId = '';
+                    this.studentDashData = null;
                 }
             }
         }

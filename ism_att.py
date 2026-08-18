@@ -190,7 +190,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         }
 
 # ==========================================
-# FACULTY CORE API (Kept 100% Intact)
+# FACULTY CORE API
 # ==========================================
 
 @app.get("/api/data/{user_id}")
@@ -629,9 +629,29 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
     try:
         safe_uid = get_safe_prefix(user_id)
         t_students = f"{safe_uid}_students"
+        reg_clean = reg_no.strip()
+        
         with engine.begin() as conn:
-            conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_no.strip(), "ro": roll_no.strip(), "n": name.strip()})
+            # Check global uniqueness across all faculties
+            faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
+            for fac in faculties:
+                f_id = fac[0]
+                if f_id == user_id:
+                    continue
+                other_t = f"{get_safe_prefix(f_id)}_students"
+                try:
+                    exists = conn.execute(text(f"SELECT 1 FROM {other_t} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": reg_clean}).fetchone()
+                    if exists:
+                        raise HTTPException(status_code=400, detail="This Registration Number is already registered in another class.")
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+            
+            conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_clean, "ro": roll_no.strip(), "n": name.strip()})
         return {"success": True, "message": "Student added successfully!"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -683,7 +703,24 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
             raise HTTPException(status_code=400, detail="Error: Could not find Reg No and Name columns in file.")
 
         inserted_students = 0
+        skipped_list = []
+
         with engine.begin() as conn:
+            # Pre-fetch existing Reg Nos from all OTHER classes
+            other_regs = set()
+            faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
+            for fac in faculties:
+                f_id = fac[0]
+                if f_id == user_id:
+                    continue
+                other_t = f"{get_safe_prefix(f_id)}_students"
+                try:
+                    res = conn.execute(text(f"SELECT reg_no FROM {other_t}")).fetchall()
+                    for r in res:
+                        other_regs.add(str(r[0]).strip().lower())
+                except:
+                    pass
+
             for _, row in df_raw.iterrows():
                 reg = str(row.get(mapped_reg, "")).strip()
                 if reg.endswith('.0'): reg = reg[:-2]
@@ -698,6 +735,10 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                 if name.lower() == 'nan': name = ""
                 
                 if reg and name:
+                    if reg.lower() in other_regs:
+                        skipped_list.append(f"{reg} - {name}")
+                        continue
+                        
                     conn.execute(text(f"""
                         INSERT INTO {t_students} (reg_no, roll_no, name) 
                         VALUES (:r, :ro, :n) 
@@ -706,8 +747,10 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                     """), {"r": reg, "ro": roll, "n": name})
                     inserted_students += 1
                     
-        return {"success": True, "message": f"Successfully registered {inserted_students} students."}
+        return {"success": True, "message": f"Successfully registered {inserted_students} students.", "skipped": skipped_list}
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
 
@@ -998,7 +1041,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- ORIGINAL FACULTY DASHBOARD (Kept 100% exactly as you provided) -->
+    <!-- ORIGINAL FACULTY DASHBOARD -->
     <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
@@ -1336,6 +1379,16 @@ def home():
                         
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
+
+                        <!-- NEW: Notification for skipped students -->
+                        <div x-show="skippedImports.length > 0" class="mt-4 bg-red-900/40 border border-red-500/50 p-4 rounded-xl text-xs" style="display: none;">
+                            <h4 class="text-red-400 font-bold mb-2">⚠️ Skipped (Already in another class):</h4>
+                            <ul class="list-disc pl-4 text-slate-300 max-h-32 overflow-y-auto custom-scrollbar">
+                                <template x-for="reg in skippedImports">
+                                    <li x-text="reg"></li>
+                                </template>
+                            </ul>
+                        </div>
                     </div>
 
                     <!-- OPTION 2: IMPORT ATTENDANCE -->
@@ -1641,6 +1694,7 @@ def home():
                 studentDashData: null,
                 tableSearchQuery: '',
                 reportSearchQuery: '',
+                skippedImports: [],
 
                 init() {
                     this.syncFromDate();
@@ -1946,6 +2000,7 @@ def home():
                 },
 
                 async importStudentsOnly() {
+                    this.skippedImports = [];
                     let fileInput = document.getElementById('studentOnlyFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
                     
@@ -1957,6 +2012,9 @@ def home():
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);
+                        if (data.skipped && data.skipped.length > 0) {
+                            this.skippedImports = data.skipped;
+                        }
                         this.loadData();
                     } else {
                         let err = await res.json();

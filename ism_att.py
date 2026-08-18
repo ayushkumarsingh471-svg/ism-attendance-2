@@ -2189,6 +2189,7 @@ def home():
                     this.userRole = '';
                     this.userId = '';
                     this.studentDashData = null;
+                    this.skippedImports = []; // Added this line so the skipped list clears when you log out
                 }
             }
         }

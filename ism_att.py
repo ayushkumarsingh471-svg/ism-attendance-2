@@ -1830,13 +1830,28 @@ def home():
                         displayVal = 'P';
                     }
 
+                    // 1. Update the clicked cell visually
                     student.days[day] = displayVal;
                     
-                    let totalP = 0;
-                    for (let d = 1; d <= this.tableNumDays; d++) {
-                        if (student.days[d] === 'P') totalP++;
+                    // 2. Re-calculate Total Classes for the whole month (count distinct days with at least one P or A)
+                    let distinctDays = new Set();
+                    for (let s of this.tableRows) {
+                        for (let d = 1; d <= this.tableNumDays; d++) {
+                            if (s.days[d] === 'P' || s.days[d] === 'A') {
+                                distinctDays.add(d);
+                            }
+                        }
                     }
-                    student.pct = this.tableTotalClasses > 0 ? Math.round((totalP / this.tableTotalClasses) * 100) : 0;
+                    this.tableTotalClasses = distinctDays.size;
+
+                    // 3. Re-calculate the % out of 100 for ALL students based on the newly updated total classes
+                    for (let s of this.tableRows) {
+                        let pCount = 0;
+                        for (let d = 1; d <= this.tableNumDays; d++) {
+                            if (s.days[d] === 'P') pCount++;
+                        }
+                        s.pct = this.tableTotalClasses > 0 ? Math.round((pCount / this.tableTotalClasses) * 100) : 0;
+                    }
 
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -2189,7 +2204,7 @@ def home():
                     this.userRole = '';
                     this.userId = '';
                     this.studentDashData = null;
-                    this.skippedImports = []; // Added this line so the skipped list clears when you log out
+                    this.skippedImports = []; 
                 }
             }
         }

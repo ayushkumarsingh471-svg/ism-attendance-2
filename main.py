@@ -73,6 +73,7 @@ def init_tenant_db(user_id):
             res_type TEXT,
             photo_data TEXT
         )'''))
+        # Leave Table (Without Document Columns for faster loading)
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_leaves} (
             id SERIAL PRIMARY KEY,
             reg_no TEXT,
@@ -82,8 +83,6 @@ def init_tenant_db(user_id):
             from_date TEXT,
             to_date TEXT,
             reason TEXT,
-            doc_data TEXT,
-            doc_name TEXT,
             status TEXT DEFAULT 'Pending',
             faculty_remark TEXT DEFAULT '',
             applied_on TEXT
@@ -150,7 +149,6 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
 
     raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
 
-# Fixed Route Path to support Slashes in Registration Numbers (e.g. BCA/2026/01)
 @app.get("/api/student_dashboard_data/{faculty_id}/{reg_no:path}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
     init_tenant_db(faculty_id)
@@ -201,10 +199,8 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         leaves_list = []
         try:
-            # FIX: DO NOT select 'doc_data' full base64 here. Just select if it exists to avoid crashing Vercel Limits.
             leaves_raw = conn.execute(text(f"""
-                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on, doc_name,
-                CASE WHEN doc_data IS NOT NULL AND doc_data != '' THEN 1 ELSE 0 END as has_doc
+                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on 
                 FROM {t_leaves} 
                 WHERE LOWER(reg_no)=LOWER(:r) 
                 ORDER BY id DESC
@@ -212,8 +208,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
             leaves_list = [{
                 "id": l[0], "leave_type": l[1], "subject": l[2], "from_date": l[3], "to_date": l[4],
-                "reason": l[5], "status": l[6], "faculty_remark": l[7] or "", "applied_on": l[8],
-                "doc_name": l[9] or "", "has_doc": bool(l[10])
+                "reason": l[5], "status": l[6], "faculty_remark": l[7] or "", "applied_on": l[8]
             } for l in leaves_raw]
         except Exception:
             leaves_list = []
@@ -246,30 +241,20 @@ async def apply_leave(
     subject: str = Form(...),
     from_date: str = Form(...),
     to_date: str = Form(...),
-    reason: str = Form(...),
-    file: UploadFile = File(None)
+    reason: str = Form(...)
 ):
     try:
         safe_uid = get_safe_prefix(faculty_id)
         t_leaves = f"{safe_uid}_leaves"
-        doc_data, doc_name = "", ""
-
-        if file and file.filename:
-            contents = await file.read()
-            doc_name = file.filename
-            b64_str = base64.b64encode(contents).decode('utf-8')
-            ext = file.filename.split('.')[-1].lower()
-            mime = "application/pdf" if ext == "pdf" else f"image/{ext}"
-            doc_data = f"data:{mime};base64,{b64_str}"
-
+        
         cur_date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, doc_data, doc_name, status, faculty_remark, applied_on)
-                VALUES (:r, :n, :lt, :sub, :fd, :td, :rs, :dd, :dn, 'Pending', '', :app_on)
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on)
+                VALUES (:r, :n, :lt, :sub, :fd, :td, :rs, 'Pending', '', :app_on)
             """), {
                 "r": reg_no.strip(), "n": student_name.strip(), "lt": leave_type, "sub": subject,
-                "fd": from_date, "td": to_date, "rs": reason, "dd": doc_data, "dn": doc_name,
+                "fd": from_date, "td": to_date, "rs": reason,
                 "app_on": cur_date_str
             })
         return {"success": True, "message": "Leave application sent successfully to your Faculty Portal!"}
@@ -281,40 +266,18 @@ def get_faculty_leaves(user_id: str):
     safe_uid = get_safe_prefix(user_id)
     t_leaves = f"{safe_uid}_leaves"
     with engine.begin() as conn:
-        # FIX: Avoid fetching full base64 file data here to prevent Vercel crashes. Use has_doc instead.
         rows = conn.execute(text(f"""
-            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, doc_name, status, faculty_remark, applied_on,
-            CASE WHEN doc_data IS NOT NULL AND doc_data != '' THEN 1 ELSE 0 END as has_doc
+            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on
             FROM {t_leaves}
             ORDER BY id DESC
         """)).fetchall()
 
         leaves = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3], "subject": r[4],
-            "from_date": r[5], "to_date": r[6], "reason": r[7], "doc_name": r[8] or "", 
-            "status": r[9], "faculty_remark": r[10] or "", "applied_on": r[11], "has_doc": bool(r[12])
+            "from_date": r[5], "to_date": r[6], "reason": r[7], 
+            "status": r[8], "faculty_remark": r[9] or "", "applied_on": r[10]
         } for r in rows]
     return {"leaves": leaves}
-
-# NEW API: Dedicated endpoint to View Huge PDF/Images without crashing the main Dashboard Load
-@app.get("/api/leave_doc/{user_id}/{leave_id}", response_class=HTMLResponse)
-def view_leave_doc(user_id: str, leave_id: int):
-    safe_uid = get_safe_prefix(user_id)
-    t_leaves = f"{safe_uid}_leaves"
-    try:
-        with engine.begin() as conn:
-            res = conn.execute(text(f"SELECT doc_data FROM {t_leaves} WHERE id=:lid"), {"lid": leave_id}).fetchone()
-        
-        if not res or not res[0]:
-            return HTMLResponse("<h3 style='text-align:center; margin-top:20%; font-family:sans-serif; color:red;'>Document not found or removed.</h3>")
-        
-        doc_data = res[0]
-        if doc_data.startswith("data:application/pdf"):
-            return HTMLResponse(f'<body style="margin:0;"><iframe src="{doc_data}" width="100%" height="100%" style="border:none;"></iframe></body>')
-        else:
-            return HTMLResponse(f'<body style="margin:0; display:flex; justify-content:center; background:#1e293b;"><img src="{doc_data}" style="max-width:100%; max-height:100vh;"></body>')
-    except Exception as e:
-        return HTMLResponse(f"<h3>Error loading document: {str(e)}</h3>")
 
 @app.post("/api/update_leave_status")
 def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), status: str = Form(...), remark: str = Form("")):
@@ -1187,7 +1150,7 @@ def home():
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">Track attendance records, check status & submit leaves with documents.</p>
+                            <p class="text-slate-400 text-xs">Track attendance records, check status & submit leaves.</p>
                         </div>
                     </div>
                 </div>
@@ -1633,7 +1596,7 @@ def home():
                 </div>
             </div>
 
-            <!-- NEW TAB 7: FACULTY LEAVE REQUESTS -->
+            <!-- TAB 7: FACULTY LEAVE REQUESTS -->
             <div x-show="currentTab === 'leaves'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
@@ -1652,7 +1615,7 @@ def home():
                                     <th class="p-3">Student Details</th>
                                     <th class="p-3">Type & Subject</th>
                                     <th class="p-3">Dates</th>
-                                    <th class="p-3">Reason / Medical Doc</th>
+                                    <th class="p-3">Reason</th>
                                     <th class="p-3">Status</th>
                                     <th class="p-3 text-center">Actions & Message</th>
                                 </tr>
@@ -1675,11 +1638,6 @@ def home():
                                         </td>
                                         <td class="p-3 max-w-xs">
                                             <p class="text-xs text-slate-300 italic mb-1" x-text="leave.reason"></p>
-                                            <template x-if="leave.has_doc">
-                                                <a :href="'/api/leave_doc/' + encodeURIComponent(userId) + '/' + leave.id" target="_blank" class="inline-flex items-center gap-1 text-xs bg-emerald-950 border border-emerald-500 text-emerald-300 px-2 py-1 rounded font-bold hover:bg-emerald-900 transition">
-                                                    📎 View Attached PDF/Doc
-                                                </a>
-                                            </template>
                                         </td>
                                         <td class="p-3">
                                             <span class="px-2.5 py-1 rounded-full text-xs font-black"
@@ -1967,13 +1925,6 @@ def home():
                     <textarea x-model="leaveForm.reason" rows="4" placeholder="Dear Faculty, I am writing to formally request leave because..." required class="w-full p-3 rounded-xl text-sm font-semibold"></textarea>
                 </div>
 
-                <div>
-                    <label class="block text-amber-400 font-bold text-xs mb-1">📎 Attach Medical Certificate / Proof (PDF or Image)</label>
-                    <!-- FIX: 4MB Upload Restriction Added to prevent Payload Crashes -->
-                    <input type="file" id="leaveDocFile" accept=".pdf,image/*" onchange="if(this.files[0].size > 4000000){ alert('File size must be under 4MB'); this.value=''; }" class="w-full p-2.5 rounded-xl text-sm bg-indigo-50">
-                    <p class="text-[11px] text-slate-400 mt-1">Upload doctor prescription, event pass or supporting slip for faster faculty approval (Max 4MB).</p>
-                </div>
-
                 <div class="flex gap-4 pt-4 border-t border-slate-700">
                     <button type="button" @click="showLeaveModal = false" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl text-sm">Discard</button>
                     <button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3 rounded-xl text-sm shadow-xl">🚀 Send Application</button>
@@ -2220,7 +2171,6 @@ def home():
                     }
                 },
 
-                // FIX: Added encodeURIComponent to prevent URL breaking if Registration No has slashes (/)
                 async loadStudentDashboard(fac_id, reg_no) {
                     try {
                         let res = await fetch(`/api/student_dashboard_data/${encodeURIComponent(fac_id)}/${encodeURIComponent(reg_no)}`);
@@ -2250,8 +2200,6 @@ def home():
                         to_date: this.selectedDate,
                         reason: ''
                     };
-                    let docInput = document.getElementById('leaveDocFile');
-                    if (docInput) docInput.value = '';
                     this.showLeaveModal = true;
                 },
 
@@ -2270,11 +2218,6 @@ def home():
                     formData.append('from_date', this.leaveForm.from_date);
                     formData.append('to_date', this.leaveForm.to_date);
                     formData.append('reason', this.leaveForm.reason);
-
-                    let docInput = document.getElementById('leaveDocFile');
-                    if (docInput && docInput.files.length > 0) {
-                        formData.append('file', docInput.files[0]);
-                    }
 
                     try {
                         let res = await fetch('/api/apply_leave', { method: 'POST', body: formData });

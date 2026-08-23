@@ -153,6 +153,9 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
 
 @app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
+    # FIXED: Initialize tables for existing faculty accounts to prevent Crash
+    init_tenant_db(faculty_id)
+    
     safe_uid = get_safe_prefix(faculty_id)
     t_students = f"{safe_uid}_students"
     t_subjects = f"{safe_uid}_subjects"
@@ -197,18 +200,22 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         history = [{"subject": r[0], "date": r[1], "status": r[2]} for r in recent_records]
 
-        leaves_raw = conn.execute(text(f"""
-            SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on, doc_name, doc_data 
-            FROM {t_leaves} 
-            WHERE LOWER(reg_no)=LOWER(:r) 
-            ORDER BY id DESC
-        """), {"r": reg_no}).fetchall()
+        leaves_list = []
+        try:
+            leaves_raw = conn.execute(text(f"""
+                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on, doc_name, doc_data 
+                FROM {t_leaves} 
+                WHERE LOWER(reg_no)=LOWER(:r) 
+                ORDER BY id DESC
+            """), {"r": reg_no.strip()}).fetchall()
 
-        leaves_list = [{
-            "id": l[0], "leave_type": l[1], "subject": l[2], "from_date": l[3], "to_date": l[4],
-            "reason": l[5], "status": l[6], "faculty_remark": l[7] or "", "applied_on": l[8],
-            "doc_name": l[9] or "", "doc_data": l[10] or ""
-        } for l in leaves_raw]
+            leaves_list = [{
+                "id": l[0], "leave_type": l[1], "subject": l[2], "from_date": l[3], "to_date": l[4],
+                "reason": l[5], "status": l[6], "faculty_remark": l[7] or "", "applied_on": l[8],
+                "doc_name": l[9] or "", "doc_data": l[10] or ""
+            } for l in leaves_raw]
+        except Exception:
+            leaves_list = []
 
         def get_cfg(k, def_v):
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
@@ -1231,7 +1238,6 @@ def home():
                     <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
                     <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
                     
-                    <!-- NEW: Leave Requests Placement (Between Manage Students and College Profile) -->
                     <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center justify-between">
                         <span class="flex items-center gap-2">📩 Leave Requests</span>
                         <span x-show="pendingLeavesCount > 0" class="bg-amber-400 text-slate-900 px-2 py-0.5 rounded-full text-xs font-black" x-text="pendingLeavesCount"></span>
@@ -1281,7 +1287,6 @@ def home():
                     </div>
                 </div>
 
-                <!-- Status Cards -->
                 <div class="grid grid-cols-4 gap-6">
                     <div class="bg-white text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-blue-500">
                         <p class="font-bold text-slate-600">Total Students</p>
@@ -1301,7 +1306,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- NEW: Defaulters List Action Card (Directly Below Total Students, Classes, Subject) -->
+                <!-- Defaulters List Action Card -->
                 <div class="mt-8 glass-card p-6 rounded-2xl border-2 border-red-500/50">
                     <div class="flex flex-col md:flex-row justify-between items-center gap-4">
                         <div>
@@ -1605,7 +1610,7 @@ def home():
                 </div>
             </div>
 
-            <!-- NEW TAB 7: FACULTY LEAVE REQUESTS (Managed Between Manage Students & College Profile) -->
+            <!-- NEW TAB 7: FACULTY LEAVE REQUESTS -->
             <div x-show="currentTab === 'leaves'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
@@ -1837,7 +1842,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- NEW: My Submitted Leaves (Placed Directly Below Daily Attendance History) -->
+                <!-- NEW: My Submitted Leaves -->
                 <div class="glass-card p-6 rounded-3xl border-2 border-indigo-400/40">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-xl font-black text-indigo-300 flex items-center gap-2">📬 My Submitted Leave Applications</h3>

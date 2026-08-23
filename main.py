@@ -9,14 +9,14 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
+app = FastAPI(title="ISM Attendance ERP - Final Production Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     try:
         import streamlit as st
         DATABASE_URL = st.secrets["DATABASE_URL"]
-    except:
+    except Exception:
         DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
 
 if DATABASE_URL.startswith("postgres://"):
@@ -26,18 +26,21 @@ from sqlalchemy.pool import NullPool
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, poolclass=NullPool)
 
 def init_master_db():
-    with engine.begin() as conn:
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS master_users (
-                username TEXT PRIMARY KEY, 
-                password TEXT
-            )
-        '''))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS master_users (
+                    username TEXT PRIMARY KEY, 
+                    password TEXT
+                )
+            '''))
+    except Exception as e:
+        print("Master DB init error:", e)
 
 init_master_db()
 
 def get_safe_prefix(uid):
-    clean = "".join(c for c in uid if c.isalnum() or c == '_').lower()
+    clean = "".join(c for c in str(uid) if c.isalnum() or c == '_').lower()
     if not clean or clean[0].isdigit():
         clean = "u_" + clean
     return clean
@@ -46,7 +49,7 @@ def sort_students_safely(students):
     def safe_roll_key(s):
         try:
             return int(''.join(filter(str.isdigit, str(s[2]))))
-        except:
+        except Exception:
             return str(s[2])
     return sorted(students, key=safe_roll_key)
 
@@ -84,11 +87,11 @@ def init_tenant_db(user_id):
             reason TEXT,
             status TEXT DEFAULT 'Pending',
             faculty_remark TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT ''
         )'''))
         try:
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
-        except:
+        except Exception:
             pass
 
         res = conn.execute(text(f"SELECT COUNT(*) FROM {t_subjects}")).fetchone()[0]
@@ -97,7 +100,7 @@ def init_tenant_db(user_id):
                 conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:sub) ON CONFLICT DO NOTHING"), {"sub": sub})
 
 # ==========================================
-# AUTHENTICATION API
+# AUTHENTICATION APIS
 # ==========================================
 
 @app.post("/api/login")
@@ -123,7 +126,6 @@ def register(username: str = Form(...), password: str = Form(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Faculty ID already exists. Please choose another.")
 
-# --- STUDENT LOGIN ---
 @app.post("/api/student_login")
 def student_login(reg_no: str = Form(...), name: str = Form(...)):
     r_no = reg_no.strip()
@@ -137,16 +139,18 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
             t_students = f"{safe_uid}_students"
             try:
                 conn.execute(text(f"SELECT 1 FROM {t_students} LIMIT 1"))
-                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
+                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r) AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
                 if st:
+                    init_tenant_db(f_id)
                     return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
             except Exception:
                 continue
 
-    raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
+    raise HTTPException(status_code=400, detail="Student not found. Please verify your Registration Number and Name.")
 
 @app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
+    init_tenant_db(faculty_id)
     safe_uid = get_safe_prefix(faculty_id)
     t_students = f"{safe_uid}_students"
     t_subjects = f"{safe_uid}_subjects"
@@ -155,8 +159,9 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
     t_leaves = f"{safe_uid}_leaves"
 
     with engine.begin() as conn:
-        st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
-        if not st: return {"error": "Student not found"}
+        st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": reg_no.strip()}).fetchone()
+        if not st: 
+            return {"error": "Student record not found in class"}
         st_id, st_name, st_roll = st[0], st[1], st[2]
 
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
@@ -189,22 +194,28 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         history = [{"subject": r[0], "date": r[1], "status": r[2]} for r in recent_records]
 
-        # Fetch student leave history
-        leave_rows = conn.execute(text(f"""
-            SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI')
-            FROM {t_leaves}
-            WHERE reg_no = :r
-            ORDER BY id DESC
-        """), {"r": reg_no}).fetchall()
+        leaves = []
+        try:
+            leave_rows = conn.execute(text(f"""
+                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, created_at
+                FROM {t_leaves}
+                WHERE LOWER(reg_no) = LOWER(:r)
+                ORDER BY id DESC
+            """), {"r": reg_no.strip()}).fetchall()
 
-        leaves = [{
-            "id": r[0], "leave_type": r[1], "subject": r[2], "from_date": r[3],
-            "to_date": r[4], "reason": r[5], "status": r[6], "faculty_remark": r[7] or '', "created_at": r[8]
-        } for r in leave_rows]
+            leaves = [{
+                "id": r[0], "leave_type": r[1], "subject": r[2], "from_date": r[3],
+                "to_date": r[4], "reason": r[5], "status": r[6], "faculty_remark": r[7] or '', "created_at": r[8] or ''
+            } for r in leave_rows]
+        except Exception:
+            leaves = []
 
         def get_cfg(k, def_v):
-            res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
-            return res[0] if res and res[0] else def_v
+            try:
+                res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
+                return res[0] if res and res[0] else def_v
+            except Exception:
+                return def_v
 
         return {
             "student": {"name": st_name, "reg_no": reg_no, "roll_no": st_roll},
@@ -219,7 +230,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         }
 
 # ==========================================
-# LEAVE MANAGEMENT APIS
+# LEAVE SYSTEM APIS
 # ==========================================
 
 @app.post("/api/apply_leave")
@@ -234,12 +245,14 @@ def apply_leave(
     reason: str = Form(...)
 ):
     try:
+        init_tenant_db(faculty_id)
         safe_uid = get_safe_prefix(faculty_id)
         t_leaves = f"{safe_uid}_leaves"
+        c_time = datetime.now().strftime("%Y-%m-%d %H:%M")
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, status)
-                VALUES (:r, :sn, :lt, :sub, :fd, :td, :re, 'Pending')
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, created_at)
+                VALUES (:r, :sn, :lt, :sub, :fd, :td, :re, 'Pending', :ca)
             """), {
                 "r": reg_no.strip(),
                 "sn": student_name.strip(),
@@ -247,7 +260,8 @@ def apply_leave(
                 "sub": subject.strip(),
                 "fd": from_date.strip(),
                 "td": to_date.strip(),
-                "re": reason.strip()
+                "re": reason.strip(),
+                "ca": c_time
             })
         return {"success": True, "message": "Leave application sent to your faculty successfully!"}
     except Exception as e:
@@ -255,11 +269,12 @@ def apply_leave(
 
 @app.get("/api/leaves/{user_id}")
 def get_faculty_leaves(user_id: str):
+    init_tenant_db(user_id)
     safe_uid = get_safe_prefix(user_id)
     t_leaves = f"{safe_uid}_leaves"
     with engine.begin() as conn:
         rows = conn.execute(text(f"""
-            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, faculty_remark, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI')
+            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, faculty_remark, created_at
             FROM {t_leaves}
             ORDER BY id DESC
         """)).fetchall()
@@ -267,7 +282,7 @@ def get_faculty_leaves(user_id: str):
         leaves = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3],
             "subject": r[4], "from_date": r[5], "to_date": r[6], "reason": r[7],
-            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10]
+            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10] or ''
         } for r in rows]
         return {"leaves": leaves}
 
@@ -292,11 +307,12 @@ def update_leave_status(
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
-# FACULTY CORE API
+# FACULTY CORE APIS
 # ==========================================
 
 @app.get("/api/data/{user_id}")
 def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE", target_date: str = "2026-07-25"):
+    init_tenant_db(user_id)
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
     t_subjects = f"{safe_uid}_subjects"
@@ -324,7 +340,6 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         students = sort_students_safely(students_raw)
         st_list = [{"id": s[0], "reg_no": s[1], "roll_no": s[2], "name": s[3]} for s in students]
 
-        # Calculate live Defaulters for selected subject (< 75%)
         defaulters = []
         if sub_id and tc_count > 0:
             att_counts = conn.execute(text(f"""
@@ -388,7 +403,6 @@ def download_defaulters_excel(user_id: str, month: str = "July", year: int = 202
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
 
-        tc_count = 0
         defaulters_data = []
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
@@ -412,13 +426,13 @@ def download_defaulters_excel(user_id: str, month: str = "July", year: int = 202
                             "Present Classes": p_cnt,
                             "Total Classes": tc_count,
                             "Attendance %": f"{pct}%",
-                            "Shortage Status": "Defaulter (< 75%)"
+                            "Status": "Defaulter (< 75%)"
                         })
 
     df = pd.DataFrame(defaulters_data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="Defaulters_List")
+        df.to_excel(writer, index=False, sheet_name="Defaulters")
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Defaulters_{subject}_{month}_{year}.xlsx"})
 
@@ -455,7 +469,8 @@ def get_attendance_table(user_id: str, month: str = "July", year: int = 2026, su
                     day_idx = int(d_str.split('-')[2])
                     if r_no not in att_map: att_map[r_no] = {}
                     att_map[r_no][day_idx] = 'P' if stat == 'Present' else 'A'
-                except: pass
+                except Exception:
+                    pass
 
         result = []
         for s in students:
@@ -504,7 +519,8 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
                     day_idx = int(d_str.split('-')[2])
                     if r_no not in att_map: att_map[r_no] = {}
                     att_map[r_no][day_idx] = 'P' if stat == 'Present' else 'A'
-                except: pass
+                except Exception:
+                    pass
 
         data = []
         for s in students:
@@ -716,7 +732,7 @@ def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subje
             else:
                 conn.execute(text(f"""
                     INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
-                    VALUES (:sid, :subid, :dt, :stat)
+                    VALUES (:sid, :subid, :dt, :stat) 
                     ON CONFLICT (student_id, subject_id, date) 
                     DO UPDATE SET status = :stat
                 """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
@@ -891,7 +907,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                     res = conn.execute(text(f"SELECT reg_no FROM {other_t}")).fetchall()
                     for r in res:
                         other_regs.add(str(r[0]).strip().lower())
-                except:
+                except Exception:
                     pass
 
             for _, row in df_raw.iterrows():
@@ -961,7 +977,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 mapped_att = target_day
             elif int(target_day) in cols:
                 mapped_att = int(target_day)
-        except:
+        except Exception:
             pass
 
         if not mapped_att:
@@ -1097,7 +1113,10 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-# --- FULL HTML FRONTEND ---
+# ==========================================
+# FRONTEND UI
+# ==========================================
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     return r"""
@@ -1135,49 +1154,43 @@ def home():
         <div class="floating-icon" style="left: 90%; animation-delay: 3s; font-size: 75px;">⭐</div>
     </div>
 
-    <!-- MAIN LOGIN SCREEN -->
+    <!-- LOGIN SCREEN -->
     <div x-show="!loggedIn" class="flex items-center justify-center min-h-screen p-6 relative z-10">
         <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
-
-            <!-- Left Branding Side -->
             <div>
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
-                <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
-
+                <p class="text-slate-300 text-sm leading-relaxed mb-6">Multi-Tenant Attendance & Student Leave Management ERP System for ISM Patna.</p>
                 <div class="space-y-4">
                     <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">👨‍🏫</div>
                         <div>
-                            <p class="text-sky-300 font-bold text-sm">Faculty Login</p>
-                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance and manage records.</p>
+                            <p class="text-sky-300 font-bold text-sm">Faculty Portal</p>
+                            <p class="text-slate-400 text-xs">Mark attendance, check defaulters (< 75%), manage records, and approve leaves.</p>
                         </div>
                     </div>
                     <div class="bg-emerald-950/60 border border-emerald-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">Read-Only access & Apply Leave system for students.</p>
+                            <p class="text-slate-400 text-xs">Check subject-wise status, register history, and compose leave applications.</p>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Right Login Form Side -->
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
-
-                <!-- Role Selector Tabs -->
                 <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
                     <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
                     <button @click="authRole = 'student'" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
                 </div>
 
-                <!-- FACULTY LOGIN / REGISTER FORM -->
+                <!-- FACULTY FORM -->
                 <div x-show="authRole === 'faculty'">
                     <div class="flex gap-2 mb-6 bg-slate-800 p-1 rounded-xl">
                         <button @click="isLogin = true" :class="isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">🔐 Login</button>
-                        <button @click="isLogin = false" :class="!isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">📄 Register New Class</button>
+                        <button @click="isLogin = false" :class="!isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">📄 Register Class</button>
                     </div>
                     <form @submit.prevent="submitAuth" class="space-y-4">
                         <div>
@@ -1192,37 +1205,29 @@ def home():
                     </form>
                 </div>
 
-                <!-- STUDENT LOGIN FORM -->
+                <!-- STUDENT FORM -->
                 <div x-show="authRole === 'student'">
-                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only & Student Services Access</p>
+                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Enter your registered details to view reports</p>
                     <form @submit.prevent="submitStudentAuth" class="space-y-4">
                         <div>
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
-                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm">
                         </div>
                         <div>
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
-                            <input type="text" x-model="studentForm.name" placeholder="Enter your full name as registered" required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                            <input type="text" x-model="studentForm.name" placeholder="Enter your full name" required class="w-full p-3 rounded-xl text-sm">
                         </div>
-                        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">ACCESS STUDENT PORTAL</button>
+                        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">ACCESS STUDENT DASHBOARD</button>
                     </form>
                 </div>
-
                 <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4"></p>
             </div>
         </div>
     </div>
 
-    <!-- ============================================================== -->
     <!-- FACULTY DASHBOARD -->
-    <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
-            <div class="anim-container">
-                <div class="floating-icon" style="left: 10%; animation-delay: 0s; font-size: 30px;">🎓</div>
-                <div class="floating-icon" style="left: 70%; animation-delay: 5s; font-size: 25px;">🏆</div>
-                <div class="floating-icon" style="left: 40%; animation-delay: 2s; font-size: 35px;">✨</div>
-            </div>
             <div class="relative z-10 overflow-y-auto pr-1 custom-scrollbar">
                 <div class="flex flex-col items-center mb-6">
                     <img :src="collegeLogo" class="w-24 h-24 rounded-full bg-white p-1 border-4 border-sky-400 shadow-lg mb-2 object-contain">
@@ -1243,10 +1248,10 @@ def home():
                     <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
                 </nav>
             </div>
-            <button @click="logout" class="bg-emerald-500 hover:bg-emerald-600 py-3 rounded-xl font-black text-center shadow-lg transition relative z-10 mt-4">🚪 LOGOUT FROM PORTAL</button>
+            <button @click="logout" class="bg-emerald-500 hover:bg-emerald-600 py-3 rounded-xl font-black text-center shadow-lg transition relative z-10 mt-4">🚪 LOGOUT</button>
         </div>
 
-        <!-- CONTENT VIEW -->
+        <!-- MAIN VIEW -->
         <div class="flex-1 flex flex-col overflow-y-auto p-6 custom-scrollbar">
             <div class="glass-card p-4 rounded-2xl shadow-xl flex items-center gap-4 mb-6 border-b-4 border-amber-500">
                 <img :src="collegeLogo" class="w-16 h-16 object-contain bg-white rounded-lg p-1">
@@ -1256,32 +1261,25 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 1: DASHBOARD (WITH DEFAULTERS LIST BELOW STATS) -->
+            <!-- DASHBOARD TAB -->
             <div x-show="currentTab === 'dashboard'">
-                <h2 class="text-xl font-black text-white mb-4 flex items-center gap-2">📊 Monthly Overview & Daily Status</h2>
                 <div class="grid grid-cols-4 gap-4 mb-6">
                     <div>
                         <label class="block text-sky-400 font-bold text-xs mb-1">Month</label>
                         <select x-model="selectedMonth" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                            <template x-for="m in months">
-                                <option :value="m" :selected="m == selectedMonth" x-text="m"></option>
-                            </template>
+                            <template x-for="m in months"><option :value="m" :selected="m == selectedMonth" x-text="m"></option></template>
                         </select>
                     </div>
                     <div>
                         <label class="block text-sky-400 font-bold text-xs mb-1">Year</label>
                         <select x-model="selectedYear" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                            <template x-for="y in years">
-                                <option :value="y" :selected="y == selectedYear" x-text="y"></option>
-                            </template>
+                            <template x-for="y in years"><option :value="y" :selected="y == selectedYear" x-text="y"></option></template>
                         </select>
                     </div>
                     <div>
                         <label class="block text-sky-400 font-bold text-xs mb-1">Subject</label>
                         <select x-model="selectedSubject" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                            <template x-for="sub in subjects">
-                                <option :value="sub" x-text="sub"></option>
-                            </template>
+                            <template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template>
                         </select>
                     </div>
                     <div>
@@ -1309,21 +1307,18 @@ def home():
                     </div>
                 </div>
 
-                <!-- DEFAULTERS LIST (DIRECTLY BELOW STATS CARDS) -->
+                <!-- DEFAULTERS LIST (EXACTLY BELOW STATS) -->
                 <div class="glass-card p-6 rounded-3xl border-2 border-red-500/50 shadow-2xl">
-                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4 pb-3 border-b border-red-500/30">
+                    <div class="flex justify-between items-center mb-4 pb-3 border-b border-red-500/30">
                         <div>
-                            <h3 class="text-xl font-black text-red-400 flex items-center gap-2">
-                                ⚠️ Defaulters List (< 75% Attendance)
-                            </h3>
-                            <p class="text-xs text-slate-300 mt-1">Students below standard 75% attendance criteria in <b class="text-yellow-400" x-text="selectedSubject"></b> for <b class="text-yellow-400" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
+                            <h3 class="text-xl font-black text-red-400 flex items-center gap-2">⚠️ Defaulters List (< 75% Attendance)</h3>
+                            <p class="text-xs text-slate-300 mt-1">Students below 75% attendance in <b class="text-yellow-400" x-text="selectedSubject"></b> for <b class="text-yellow-400" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
                         </div>
                         <div class="flex items-center gap-3">
                             <span class="bg-red-950 text-red-400 font-bold border border-red-500/50 px-3 py-1 rounded-full text-xs" x-text="defaultersList.length + ' Students Shortage'"></span>
-                            <a :href="'/api/download_defaulters_excel/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-red-600 hover:bg-red-700 text-white font-black text-xs py-2 px-4 rounded-xl shadow transition flex items-center gap-1">📊 Export Defaulters (Excel)</a>
+                            <a :href="'/api/download_defaulters_excel/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-red-600 hover:bg-red-700 text-white font-black text-xs py-2 px-4 rounded-xl shadow transition">📊 Export Defaulters (Excel)</a>
                         </div>
                     </div>
-
                     <div class="overflow-x-auto bg-slate-900/80 rounded-2xl border border-red-500/30">
                         <table class="w-full text-sm text-center">
                             <thead>
@@ -1351,83 +1346,57 @@ def home():
                                 </template>
                                 <tr x-show="defaultersList.length === 0">
                                     <td colspan="6" class="p-6 text-center text-emerald-400 font-bold">
-                                        🎉 No defaulters found! All students are maintaining >= 75% attendance or no classes recorded.
+                                        🎉 No defaulters! All students maintain >= 75% attendance.
                                     </td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
                 </div>
-
             </div>
 
-            <!-- TAB 2: MARK ATTENDANCE -->
+            <!-- MARK ATTENDANCE TAB -->
             <div x-show="currentTab === 'mark'">
                 <div class="grid grid-cols-4 gap-4 mb-6">
-                    <select x-model="selectedMonth" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="m in months">
-                            <option :value="m" :selected="m == selectedMonth" x-text="m"></option>
-                        </template>
-                    </select>
-                    <select x-model="selectedYear" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="y in years">
-                            <option :value="y" :selected="y == selectedYear" x-text="y"></option>
-                        </template>
-                    </select>
-                    <select x-model="selectedSubject" @change="loadData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="sub in subjects">
-                            <option :value="sub" x-text="sub"></option>
-                        </template>
-                    </select>
+                    <select x-model="selectedMonth" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="m in months"><option :value="m" :selected="m == selectedMonth" x-text="m"></option></template></select>
+                    <select x-model="selectedYear" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="y in years"><option :value="y" :selected="y == selectedYear" x-text="y"></option></template></select>
+                    <select x-model="selectedSubject" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                     <input type="date" x-model="selectedDate" @change="syncFromDate(); loadData()" class="w-full p-2.5 rounded-xl">
                 </div>
 
                 <div class="grid grid-cols-2 gap-8 items-start" x-show="students.length > 0">
-                    <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 p-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full relative">
-                        <div class="w-12 h-2 bg-slate-800 rounded-full mx-auto mb-4"></div>
-                        <div class="bg-gradient-to-r from-emerald-700 to-emerald-900 text-white p-3 rounded-xl flex items-center gap-3 border-b-4 border-amber-400">
+                    <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 p-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full">
+                        <div class="bg-gradient-to-r from-emerald-700 to-emerald-900 text-white p-3 rounded-xl flex items-center gap-3 border-b-4 border-amber-400 mb-3">
                             <img :src="collegeLogo" class="w-8 h-8 bg-white rounded-full p-0.5 object-contain">
                             <div class="text-[11px] font-black leading-tight" x-text="collegeName.toUpperCase()"></div>
                         </div>
-                        <div class="flex justify-center my-4 relative">
-                            <img :src="currentStudentPhoto" class="w-28 h-28 rounded-full object-cover border-4 border-sky-500 shadow-md bg-white">
-                            <span class="absolute bottom-0 right-20 text-red-600 font-black text-xs bg-white px-1 rounded shadow">🩸 A+</span>
+                        <div class="flex justify-center my-3">
+                            <img :src="currentStudentPhoto" class="w-24 h-24 rounded-full object-cover border-4 border-sky-500 shadow-md bg-white">
                         </div>
                         <h2 class="text-center text-xl font-black text-slate-900" x-text="currentStudent.name"></h2>
                         <p class="text-center font-bold text-slate-700 text-xs" x-text="'ROLL NO : ' + currentStudent.roll_no"></p>
                         <p class="text-center font-bold text-slate-600 text-xs mb-3" x-text="'REG NO : ' + currentStudent.reg_no"></p>
-                        <div class="bg-emerald-700 text-white text-center font-black py-1 rounded-lg text-xs mb-3 shadow" x-text="courseName + ' - ' + sectionName"></div>
-                        <div class="bg-sky-600 text-white text-center font-bold py-1 rounded-full text-[11px] mb-3 shadow" x-text="currentStudentDetails.res_type"></div>
+                        <div class="bg-emerald-700 text-white text-center font-black py-1 rounded-lg text-xs mb-2" x-text="courseName + ' - ' + sectionName"></div>
                         <div class="text-[11px] space-y-1 font-semibold text-slate-800 border-t border-sky-400 border-dashed pt-2">
-                            <p><b>Email :</b> <span x-text="currentStudentDetails.email"></span></p>
-                            <p><b>Contact :</b> <span x-text="currentStudentDetails.contact"></span></p>
-                            <p><b>Guardian :</b> <span x-text="currentStudentDetails.parent_name + ' (' + currentStudentDetails.parent_contact + ')'"></span></p>
-                        </div>
-                        <div class="flex justify-between items-end mt-4 pt-2 border-t border-sky-400 text-[10px] font-bold text-slate-600">
-                            <span>Valid till : <b>2028</b></span>
-                            <div class="text-center">
-                                <p class="font-serif italic text-slate-900 text-xs">Principal</p>
-                                <p class="border-t border-slate-500">Principal</p>
-                            </div>
+                            <p><b>Email:</b> <span x-text="currentStudentDetails.email"></span></p>
+                            <p><b>Contact:</b> <span x-text="currentStudentDetails.contact"></span></p>
+                            <p><b>Guardian:</b> <span x-text="currentStudentDetails.parent_name + ' (' + currentStudentDetails.parent_contact + ')'"></span></p>
                         </div>
                     </div>
 
                     <div class="space-y-6">
-                        <h3 class="text-xl font-black text-amber-400 flex items-center gap-2">⚡ Action Controls:</h3>
                         <div class="grid grid-cols-2 gap-4">
-                            <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🟢 MARK PRESENT (P)</button>
-                            <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🔴 MARK ABSENT (A)</button>
+                            <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
+                            <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
                         </div>
                         <div>
-                            <label class="block text-white font-bold text-sm mb-1">🔍 Search Student Directly by Reg No:</label>
-                            <input type="text" x-model="searchReg" @input="searchByReg" placeholder="Type exact Registration Number here..." class="w-full p-3 rounded-xl shadow">
+                            <label class="block text-white font-bold text-sm mb-1">🔍 Search Student by Reg No:</label>
+                            <input type="text" x-model="searchReg" @input="searchByReg" placeholder="Type Registration Number..." class="w-full p-3 rounded-xl shadow">
                         </div>
                         <div>
-                            <label class="block text-white font-bold text-sm mb-1">🔍 Quick Jump to Student</label>
+                            <label class="block text-white font-bold text-sm mb-1">🔍 Quick Jump</label>
                             <select x-model="currentIndex" @change="fetchStudentDetails" class="w-full p-3 rounded-xl">
-                                <template x-for="(st, idx) in students">
-                                    <option :value="idx" x-text="st.reg_no + ' - ' + st.name"></option>
-                                </template>
+                                <template x-for="(st, idx) in students"><option :value="idx" x-text="st.reg_no + ' - ' + st.name"></option></template>
                             </select>
                         </div>
                         <div class="flex gap-4">
@@ -1438,38 +1407,19 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE -->
+            <!-- ATTENDANCE TABLE TAB -->
             <div x-show="currentTab === 'table'">
-                <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
-
                 <div class="grid grid-cols-3 gap-4 mb-4">
-                    <select x-model="tableMonth" @change="loadTableData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="m in months">
-                            <option :value="m" :selected="m == tableMonth" x-text="m"></option>
-                        </template>
-                    </select>
-                    <select x-model="tableYear" @change="loadTableData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="y in years">
-                            <option :value="y" :selected="y == tableYear" x-text="y"></option>
-                        </template>
-                    </select>
-                    <select x-model="tableSubject" @change="loadTableData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="sub in subjects">
-                            <option :value="sub" x-text="sub"></option>
-                        </template>
-                    </select>
+                    <select x-model="tableMonth" @change="loadTableData()" class="w-full p-2.5 rounded-xl"><template x-for="m in months"><option :value="m" :selected="m == tableMonth" x-text="m"></option></template></select>
+                    <select x-model="tableYear" @change="loadTableData()" class="w-full p-2.5 rounded-xl"><template x-for="y in years"><option :value="y" :selected="y == tableYear" x-text="y"></option></template></select>
+                    <select x-model="tableSubject" @change="loadTableData()" class="w-full p-2.5 rounded-xl"><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                 </div>
-
-                <div class="flex gap-4 mb-6">
-                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                <div class="flex gap-4 mb-4">
+                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
-
                 <div class="mb-4">
-                    <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
+                    <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search student in table..." class="w-full p-3 rounded-xl shadow">
                 </div>
-
-                <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: You can click directly on any box below to toggle Attendance (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
-
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table border-collapse">
                         <thead>
@@ -1477,9 +1427,7 @@ def home():
                                 <th class="p-3 border sticky left-0 bg-blue-900 z-10 w-28">Reg No</th>
                                 <th class="p-3 border sticky left-28 bg-blue-900 z-10 w-16">Roll</th>
                                 <th class="p-3 border text-left sticky left-44 bg-blue-900 z-10 w-80">Student Name</th>
-                                <template x-for="d in tableNumDays">
-                                    <th class="p-1 border text-xs w-8 h-8" x-text="d"></th>
-                                </template>
+                                <template x-for="d in tableNumDays"><th class="p-1 border text-xs w-8 h-8" x-text="d"></th></template>
                                 <th class="p-3 border w-16">%</th>
                             </tr>
                         </thead>
@@ -1490,12 +1438,10 @@ def home():
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
                                     <template x-for="d in tableNumDays">
-                                        <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
-                                            title="Click to toggle Present/Absent"
-                                            :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black hover:bg-emerald-600' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black hover:bg-red-600' : 'hover:bg-sky-200')" 
+                                        <td class="border text-xs text-center cursor-pointer select-none" 
+                                            :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black' : 'hover:bg-sky-200')" 
                                             x-text="st.days[d]"
-                                            @click="toggleCellAttendance(st, d)">
-                                        </td>
+                                            @click="toggleCellAttendance(st, d)"></td>
                                     </template>
                                     <td class="p-3 border font-black text-blue-800" x-text="st.pct + '%'"></td>
                                 </tr>
@@ -1505,32 +1451,20 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 4: MONTHLY COMPILE REPORT -->
+            <!-- MONTHLY REPORT TAB -->
             <div x-show="currentTab === 'report'">
-                <h2 class="text-2xl font-black text-white mb-4">📑 Consolidated Monthly Attendance & Percentage Report</h2>
-                <div class="grid grid-cols-2 gap-4 mb-6">
-                    <select x-model="reportMonth" @change="loadReportData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="m in months">
-                            <option :value="m" :selected="m == reportMonth" x-text="m"></option>
-                        </template>
-                    </select>
-                    <select x-model="reportYear" @change="loadReportData()" class="w-full p-2.5 rounded-xl">
-                        <template x-for="y in years">
-                            <option :value="y" :selected="y == reportYear" x-text="y"></option>
-                        </template>
-                    </select>
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <select x-model="reportMonth" @change="loadReportData()" class="w-full p-2.5 rounded-xl"><template x-for="m in months"><option :value="m" :selected="m == reportMonth" x-text="m"></option></template></select>
+                    <select x-model="reportYear" @change="loadReportData()" class="w-full p-2.5 rounded-xl"><template x-for="y in years"><option :value="y" :selected="y == reportYear" x-text="y"></option></template></select>
                 </div>
-
-                <div class="flex gap-4 mb-6">
-                    <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
-                    <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
-                    <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
+                <div class="flex gap-4 mb-4">
+                    <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow">📊 DOWNLOAD EXCEL</a>
+                    <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow">📥 DOWNLOAD PDF</a>
+                    <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow">🔗 SHARE PDF</button>
                 </div>
-
-                <div class="mb-6">
-                    <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
+                <div class="mb-4">
+                    <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search student in report..." class="w-full p-3 rounded-xl shadow">
                 </div>
-
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center">
                         <thead>
@@ -1538,9 +1472,7 @@ def home():
                                 <th class="p-3 border">Reg No</th>
                                 <th class="p-3 border">Roll No</th>
                                 <th class="p-3 border text-left">Student Name</th>
-                                <template x-for="sub in reportSubjects">
-                                    <th class="p-2 border" x-text="sub"></th>
-                                </template>
+                                <template x-for="sub in reportSubjects"><th class="p-2 border" x-text="sub"></th></template>
                                 <th class="p-3 border">Overall %</th>
                             </tr>
                         </thead>
@@ -1550,9 +1482,7 @@ def home():
                                     <td class="p-3 border" x-text="st.reg_no"></td>
                                     <td class="p-3 border" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left" x-text="st.name"></td>
-                                    <template x-for="sub in reportSubjects">
-                                        <td class="p-2 border" x-text="st.subs[sub]"></td>
-                                    </template>
+                                    <template x-for="sub in reportSubjects"><td class="p-2 border" x-text="st.subs[sub]"></td></template>
                                     <td class="p-3 border font-black text-emerald-700" x-text="st.overall"></td>
                                 </tr>
                             </template>
@@ -1561,212 +1491,141 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 5: FACULTY LEAVE REQUESTS INBOX -->
+            <!-- LEAVE INBOX TAB -->
             <div x-show="currentTab === 'leaves'">
                 <div class="flex justify-between items-center mb-6">
                     <div>
                         <h2 class="text-2xl font-black text-white">✉️ Student Leave Applications Inbox</h2>
-                        <p class="text-xs text-slate-300 mt-1">Review leave applications submitted by students in your class and reply with your remark.</p>
+                        <p class="text-xs text-slate-300 mt-1">Review student applications and reply with approval/rejection remarks.</p>
                     </div>
-                    <button @click="loadFacultyLeaves()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh Applications</button>
+                    <button @click="loadFacultyLeaves()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
                 </div>
 
                 <div class="space-y-4">
                     <template x-for="leave in facultyLeaves">
-                        <div class="glass-card p-6 rounded-2xl border-l-8 transition duration-200" 
-                             :class="leave.status === 'Approved' ? 'border-emerald-500' : (leave.status === 'Rejected' ? 'border-red-500' : 'border-amber-500')">
-                            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 mb-3">
+                        <div class="glass-card p-6 rounded-2xl border-l-8" :class="leave.status === 'Approved' ? 'border-emerald-500' : (leave.status === 'Rejected' ? 'border-red-500' : 'border-amber-500')">
+                            <div class="flex justify-between items-start mb-2">
                                 <div>
-                                    <span class="bg-sky-950 text-sky-400 font-black px-2.5 py-1 rounded-md text-xs border border-sky-400/40" x-text="leave.leave_type"></span>
+                                    <span class="bg-sky-950 text-sky-400 font-black px-2.5 py-1 rounded text-xs border border-sky-400/40" x-text="leave.leave_type"></span>
                                     <h3 class="text-lg font-black text-white mt-1" x-text="leave.student_name + ' (' + leave.reg_no + ')'"></h3>
-                                    <p class="text-xs text-amber-300 font-bold" x-text="'Subject/Context: ' + leave.subject + ' | Period: ' + leave.from_date + ' to ' + leave.to_date"></p>
+                                    <p class="text-xs text-amber-300 font-bold" x-text="'Subject: ' + leave.subject + ' | Period: ' + leave.from_date + ' to ' + leave.to_date"></p>
                                 </div>
-                                <div class="text-right">
-                                    <span class="px-3 py-1 rounded-full text-xs font-black shadow"
-                                          :class="leave.status === 'Approved' ? 'bg-emerald-900 text-emerald-300 border border-emerald-500' : (leave.status === 'Rejected' ? 'bg-red-900 text-red-300 border border-red-500' : 'bg-amber-900 text-amber-300 border border-amber-500')"
-                                          x-text="leave.status"></span>
-                                    <p class="text-[10px] text-slate-400 mt-1" x-text="'Applied on: ' + leave.created_at"></p>
-                                </div>
+                                <span class="px-3 py-1 rounded-full text-xs font-black shadow"
+                                      :class="leave.status === 'Approved' ? 'bg-emerald-900 text-emerald-300 border border-emerald-500' : (leave.status === 'Rejected' ? 'bg-red-900 text-red-300 border border-red-500' : 'bg-amber-900 text-amber-300 border border-amber-500')"
+                                      x-text="leave.status"></span>
                             </div>
-
-                            <div class="bg-slate-900/90 p-4 rounded-xl border border-slate-700 text-slate-200 text-xs mb-4 leading-relaxed">
-                                <p class="font-bold text-sky-400 mb-1">Student's Statement / Application:</p>
-                                <p x-text="leave.reason" class="whitespace-pre-wrap"></p>
-                            </div>
-
-                            <div x-show="leave.faculty_remark" class="bg-indigo-950/60 p-3 rounded-xl border border-indigo-500/40 text-xs text-indigo-200 mb-4">
+                            <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-700 text-slate-200 text-xs mb-3 whitespace-pre-wrap" x-text="leave.reason"></div>
+                            <div x-show="leave.faculty_remark" class="bg-indigo-950/60 p-2.5 rounded-xl border border-indigo-500/40 text-xs text-indigo-200 mb-3">
                                 <b>Your Previous Remark:</b> <span x-text="leave.faculty_remark"></span>
                             </div>
-
-                            <!-- Action Box -->
-                            <div class="pt-3 border-t border-slate-700 flex flex-col sm:flex-row gap-3 items-center">
-                                <input type="text" x-model="leaveRemarkInput[leave.id]" placeholder="Enter message / remarks for the student..." class="flex-1 p-2.5 rounded-xl text-xs bg-white text-slate-900 font-bold">
-                                <div class="flex gap-2 w-full sm:w-auto">
-                                    <button @click="respondLeave(leave.id, 'Approved')" class="flex-1 sm:flex-initial bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow transition">✅ Approve</button>
-                                    <button @click="respondLeave(leave.id, 'Rejected')" class="flex-1 sm:flex-initial bg-red-600 hover:bg-red-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow transition">❌ Reject</button>
-                                </div>
+                            <div class="pt-3 border-t border-slate-700 flex gap-3 items-center">
+                                <input type="text" x-model="leaveRemarkInput[leave.id]" placeholder="Enter response / message for student..." class="flex-1 p-2.5 rounded-xl text-xs bg-white text-slate-900 font-bold">
+                                <button @click="respondLeave(leave.id, 'Approved')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">✅ Approve</button>
+                                <button @click="respondLeave(leave.id, 'Rejected')" class="bg-red-600 hover:bg-red-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">❌ Reject</button>
                             </div>
                         </div>
                     </template>
-
                     <div x-show="facultyLeaves.length === 0" class="glass-card p-12 text-center rounded-2xl text-slate-400 font-bold">
                         📭 No leave applications received yet.
                     </div>
                 </div>
             </div>
 
-            <!-- TAB 6: RESET / CLEAR ATTENDANCE -->
+            <!-- RESET TAB -->
             <div x-show="currentTab === 'reset'">
-                <h2 class="text-2xl font-black text-white mb-4">🧹 Reset / Clear Attendance Logs</h2>
                 <div class="glass-card p-6 rounded-2xl space-y-6">
-                    <div>
-                        <label class="block text-sky-400 font-bold mb-2">Select Reset Scope:</label>
-                        <div class="grid grid-cols-3 gap-4">
-                            <button @click="resetScope = 'single'" :class="resetScope === 'single' ? 'bg-emerald-600 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">👤 Single Student Reset</button>
-                            <button @click="resetScope = 'class'" :class="resetScope === 'class' ? 'bg-red-600 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">🏫 Entire Class Bulk Reset</button>
-                            <button @click="resetScope = 'date'" :class="resetScope === 'date' ? 'bg-red-700 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">📅 Specific Date Reset</button>
-                        </div>
+                    <h2 class="text-2xl font-black text-white">🧹 Reset / Clear Attendance Logs</h2>
+                    <div class="grid grid-cols-3 gap-4">
+                        <button @click="resetScope = 'single'" :class="resetScope === 'single' ? 'bg-emerald-600' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow">👤 Single Student</button>
+                        <button @click="resetScope = 'class'" :class="resetScope === 'class' ? 'bg-red-600' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow">🏫 Class Reset</button>
+                        <button @click="resetScope = 'date'" :class="resetScope === 'date' ? 'bg-red-700' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow">📅 Date Reset</button>
                     </div>
                     <div class="grid grid-cols-3 gap-4">
-                        <select x-show="resetScope === 'single'" x-model="resetReg" class="w-full p-3 rounded-xl">
-                            <option value="">--- Select Student ---</option>
-                            <template x-for="st in students"><option :value="st.reg_no" x-text="st.reg_no + ' - ' + st.name"></option></template>
-                        </select>
-                        <select x-model="resetSubject" class="w-full p-3 rounded-xl">
-                            <option value="All Subjects">All Subjects</option>
-                            <template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template>
-                        </select>
+                        <select x-show="resetScope === 'single'" x-model="resetReg" class="w-full p-3 rounded-xl"><option value="">--- Select Student ---</option><template x-for="st in students"><option :value="st.reg_no" x-text="st.reg_no + ' - ' + st.name"></option></template></select>
+                        <select x-model="resetSubject" class="w-full p-3 rounded-xl"><option value="All Subjects">All Subjects</option><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                         <input type="date" x-show="resetScope === 'date'" x-model="resetDate" class="w-full p-3 rounded-xl">
                     </div>
-                    <button @click="executeReset" class="bg-red-600 hover:bg-red-700 text-white font-black py-3 px-6 rounded-xl shadow-lg">⚠️ Execute Purge / Reset Records</button>
+                    <button @click="executeReset" class="bg-red-600 hover:bg-red-700 text-white font-black py-3 px-6 rounded-xl shadow">⚠️ Execute Purge / Reset Records</button>
                 </div>
             </div>
 
-            <!-- TAB 7: MANAGE STUDENTS -->
+            <!-- MANAGE STUDENTS TAB -->
             <div x-show="currentTab === 'students'" class="space-y-6">
-                <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
-
                 <div class="grid grid-cols-2 gap-6">
-                    <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
-                        <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
-                        <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
+                    <div class="glass-card p-6 rounded-2xl">
+                        <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register Students (Excel/CSV)</h3>
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
-                        <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
-                        <div x-show="skippedImports.length > 0" class="mt-4 bg-red-900/40 border border-red-500/50 p-4 rounded-xl text-xs" style="display: none;">
-                            <h4 class="text-red-400 font-bold mb-2">⚠️ Skipped (Already in another class):</h4>
-                            <ul class="list-disc pl-4 text-slate-300 max-h-32 overflow-y-auto custom-scrollbar">
-                                <template x-for="reg in skippedImports"><li x-text="reg"></li></template>
-                            </ul>
-                        </div>
+                        <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow">Add Students</button>
                     </div>
-
-                    <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
+                    <div class="glass-card p-6 rounded-2xl">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
-                        <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
                         <div class="grid grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label class="block text-white font-bold text-xs mb-1">Select Subject</label>
-                                <select x-model="importSubject" class="w-full p-2.5 rounded-xl text-sm">
-                                    <template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template>
-                                </select>
-                            </div>
-                            <div>
-                                <label class="block text-white font-bold text-xs mb-1">Select Date</label>
-                                <input type="date" x-model="importDate" class="w-full p-2.5 rounded-xl text-sm">
-                            </div>
+                            <select x-model="importSubject" class="w-full p-2.5 rounded-xl text-sm"><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
+                            <input type="date" x-model="importDate" class="w-full p-2.5 rounded-xl text-sm">
                         </div>
                         <input type="file" id="attendanceFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-emerald-50 text-slate-900">
-                        <button @click="importAttendanceOnly" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow transition">Mark Attendance from File</button>
+                        <button @click="importAttendanceOnly" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow">Mark Attendance from File</button>
                     </div>
                 </div>
 
                 <div class="grid grid-cols-2 gap-6">
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">➕ Add Single Student Manually</h3>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">➕ Add Single Student</h3>
                         <form @submit.prevent="addStudent" class="space-y-4">
                             <input type="text" x-model="newStudent.reg_no" placeholder="Registration No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.roll_no" placeholder="Roll No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.name" placeholder="Full Name" required class="w-full p-3 rounded-xl">
-                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Save Student</button>
+                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Student</button>
                         </form>
                     </div>
-
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">📸 Upload Photo & Profile Details</h3>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">📸 Upload Photo & Profile</h3>
                         <form @submit.prevent="saveStudentProfile" class="space-y-3">
-                            <select x-model="profileReg" class="w-full p-2.5 rounded-xl">
-                                <option value="">--- Select Student ---</option>
-                                <template x-for="st in students"><option :value="st.reg_no" x-text="st.reg_no + ' - ' + st.name"></option></template>
-                            </select>
+                            <select x-model="profileReg" class="w-full p-2 rounded-xl"><option value="">--- Select Student ---</option><template x-for="st in students"><option :value="st.reg_no" x-text="st.reg_no + ' - ' + st.name"></option></template></select>
                             <input type="file" id="studentPhotoFile" class="w-full p-2 rounded-xl text-sm bg-sky-50">
-                            <input type="email" x-model="profileForm.email" placeholder="Email ID" class="w-full p-2 rounded-xl text-sm">
-                            <input type="text" x-model="profileForm.contact" placeholder="Student Contact No" class="w-full p-2 rounded-xl text-sm">
-                            <input type="text" x-model="profileForm.parent_name" placeholder="Parent / Guardian Name" class="w-full p-2 rounded-xl text-sm">
-                            <input type="text" x-model="profileForm.parent_contact" placeholder="Parent Contact No" class="w-full p-2 rounded-xl text-sm">
-                            <select x-model="profileForm.res_type" class="w-full p-2.5 rounded-xl text-sm">
-                                <option>🏠 HOSTELER (Hostel Resident)</option>
-                                <option>🚌 DAY SCHOLAR (Regular / Up-Down)</option>
-                            </select>
-                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile</button>
+                            <input type="email" x-model="profileForm.email" placeholder="Email" class="w-full p-2 rounded-xl text-sm">
+                            <input type="text" x-model="profileForm.contact" placeholder="Contact" class="w-full p-2 rounded-xl text-sm">
+                            <input type="text" x-model="profileForm.parent_name" placeholder="Guardian Name" class="w-full p-2 rounded-xl text-sm">
+                            <input type="text" x-model="profileForm.parent_contact" placeholder="Guardian Contact" class="w-full p-2 rounded-xl text-sm">
+                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-2.5 rounded-xl shadow">Save Profile</button>
                         </form>
                     </div>
-
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
-                        <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
-                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, leave requests, and attendance records from the database for your account.</p>
+                        <h3 class="text-xl font-black text-red-400 mb-2">⚠️ Delete All Students</h3>
                         <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
                     </div>
                 </div>
             </div>
 
-            <!-- TAB 8: COLLEGE PROFILE -->
+            <!-- PROFILE TAB -->
             <div x-show="currentTab === 'profile'">
-                <h2 class="text-2xl font-black text-white mb-4">🏢 Core Settings</h2>
                 <div class="grid grid-cols-2 gap-6">
                     <div class="glass-card p-6 rounded-2xl">
-                        <h3 class="text-xl font-black text-sky-400 mb-4">🏫 Institutional Config</h3>
+                        <h3 class="text-xl font-black text-sky-400 mb-4">🏫 Institutional Details</h3>
                         <form @submit.prevent="saveCollegeProfile" class="space-y-4">
-                            <div>
-                                <label class="block text-sky-400 font-bold text-xs mb-1">College Name</label>
-                                <input type="text" x-model="collegeName" required class="w-full p-3 rounded-xl">
-                            </div>
-                            <div>
-                                <label class="block text-sky-400 font-bold text-xs mb-1">Subtitle</label>
-                                <input type="text" x-model="appSubtitle" required class="w-full p-3 rounded-xl">
-                            </div>
-                            <div>
-                                <label class="block text-sky-400 font-bold text-xs mb-1">Course</label>
-                                <input type="text" x-model="courseName" required class="w-full p-3 rounded-xl">
-                            </div>
-                            <div>
-                                <label class="block text-sky-400 font-bold text-xs mb-1">Semester / Section</label>
-                                <input type="text" x-model="sectionName" required class="w-full p-3 rounded-xl">
-                            </div>
-                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Metadata</button>
+                            <input type="text" x-model="collegeName" required class="w-full p-3 rounded-xl">
+                            <input type="text" x-model="appSubtitle" required class="w-full p-3 rounded-xl">
+                            <input type="text" x-model="courseName" required class="w-full p-3 rounded-xl">
+                            <input type="text" x-model="sectionName" required class="w-full p-3 rounded-xl">
+                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Info</button>
                         </form>
                     </div>
                     <div class="space-y-6">
                         <div class="glass-card p-6 rounded-2xl">
-                            <h3 class="text-xl font-black text-sky-400 mb-4">📚 Add Subject</h3>
-                            <form @submit.prevent="addSubject" class="space-y-4">
+                            <h3 class="text-xl font-black text-sky-400 mb-4">📚 Add / Delete Subject</h3>
+                            <form @submit.prevent="addSubject" class="space-y-3 mb-4">
                                 <input type="text" x-model="newSubject" placeholder="Subject Name" required class="w-full p-3 rounded-xl">
-                                <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Add Subject</button>
+                                <button type="submit" class="w-full bg-blue-500 text-white font-black py-2.5 rounded-xl shadow">Add Subject</button>
+                            </form>
+                            <form @submit.prevent="deleteSubject" class="space-y-3">
+                                <select x-model="delSubject" class="w-full p-3 rounded-xl"><option value="">--- Select Subject ---</option><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
+                                <button type="submit" class="w-full bg-red-500 text-white font-black py-2.5 rounded-xl shadow">Delete Subject</button>
                             </form>
                         </div>
                         <div class="glass-card p-6 rounded-2xl">
-                            <h3 class="text-xl font-black text-sky-400 mb-4">🗑️ Delete Subject</h3>
-                            <form @submit.prevent="deleteSubject" class="space-y-4">
-                                <select x-model="delSubject" class="w-full p-3 rounded-xl">
-                                    <option value="">--- Select Subject ---</option>
-                                    <template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template>
-                                </select>
-                                <button type="submit" class="w-full bg-red-500 text-white font-black py-3 rounded-xl shadow">Delete Subject</button>
-                            </form>
-                        </div>
-                        <div class="glass-card p-6 rounded-2xl">
-                            <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ College Logo (Cloud Secured)</h3>
+                            <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ Logo Upload</h3>
                             <input type="file" id="logoFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                            <button @click="uploadLogo" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Upload Logo to Cloud</button>
+                            <button @click="uploadLogo" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Upload Logo</button>
                         </div>
                     </div>
                 </div>
@@ -1774,12 +1633,8 @@ def home():
         </div>
     </div>
 
-    <!-- ============================================== -->
-    <!-- STUDENT DASHBOARD WITH LEAVE SYSTEM            -->
-    <!-- ============================================== -->
+    <!-- STUDENT DASHBOARD -->
     <div x-show="loggedIn && userRole === 'student'" class="min-h-screen relative z-10 p-4 md:p-8" style="display: none;">
-
-        <!-- Header -->
         <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex justify-between items-center border-t-4 border-emerald-500">
             <div class="flex items-center gap-4">
                 <img :src="studentDashData?.logo || 'https://i.ibb.co/3s68K1v/tree-logo.png'" class="w-16 h-16 bg-white rounded-xl p-1 shadow object-contain">
@@ -1789,52 +1644,35 @@ def home():
                 </div>
             </div>
             <div class="flex gap-3">
-                <button @click="openLeaveModal = true" class="bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-black px-5 py-2.5 rounded-xl shadow-lg transition flex items-center gap-2 text-sm">
-                    ✉️ Apply for Leave
-                </button>
+                <button @click="openLeaveModal = true" class="bg-amber-500 hover:bg-amber-600 text-slate-950 font-black px-5 py-2.5 rounded-xl shadow-lg transition text-sm">✉️ Apply for Leave</button>
                 <button @click="logout" class="bg-red-500 hover:bg-red-600 text-white font-black px-6 py-2.5 rounded-xl shadow-lg transition text-sm">🚪 Logout</button>
             </div>
         </div>
 
         <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8" x-show="studentDashData">
-
-            <!-- Left Profile Card -->
             <div class="col-span-1 space-y-6">
                 <div class="bg-slate-900 border-2 border-emerald-500/30 p-6 rounded-3xl shadow-2xl text-center">
                     <div class="text-6xl mb-4">🎓</div>
                     <h2 class="text-2xl font-black text-white" x-text="studentDashData.student.name"></h2>
                     <p class="text-sky-300 font-bold mt-1">Roll No: <span x-text="studentDashData.student.roll_no"></span></p>
                     <p class="text-slate-400 font-bold text-xs mt-1">Reg No: <span x-text="studentDashData.student.reg_no"></span></p>
-
                     <div class="mt-8 pt-6 border-t border-slate-700">
                         <p class="text-slate-400 font-bold text-sm mb-2">Overall Attendance</p>
                         <div class="flex justify-center items-center">
                             <div class="w-32 h-32 rounded-full border-8 flex items-center justify-center text-3xl font-black shadow-[0_0_15px_rgba(16,185,129,0.5)]"
                                  :class="studentDashData.overall_pct >= 75 ? 'border-emerald-500 text-emerald-400' : 'border-red-500 text-red-400'"
-                                 x-text="studentDashData.overall_pct + '%'">
-                            </div>
+                                 x-text="studentDashData.overall_pct + '%'"></div>
                         </div>
                         <p class="mt-4 text-xs font-bold" :class="studentDashData.overall_pct >= 75 ? 'text-emerald-400' : 'text-red-400'">
-                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Zone' : '⚠️ Shortage Zone (< 75%)'"></span>
+                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Attendance Zone' : '⚠️ Shortage Zone (< 75%)'"></span>
                         </p>
                     </div>
                 </div>
-
-                <!-- Quick Apply Leave Button Card -->
-                <div class="glass-card p-5 rounded-3xl border-2 border-amber-500/40 text-center">
-                    <p class="text-xs text-slate-300 font-bold mb-3">Need to take medical or event leave?</p>
-                    <button @click="openLeaveModal = true" class="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-3 rounded-2xl shadow transition text-sm flex justify-center items-center gap-2">
-                        📝 Compose Leave Application
-                    </button>
-                </div>
             </div>
 
-            <!-- Right Details Area -->
             <div class="col-span-1 md:col-span-2 space-y-8">
-
-                <!-- Subject Wise Compile Report -->
                 <div class="glass-card p-6 rounded-3xl">
-                    <h3 class="text-xl font-black text-amber-400 mb-6 flex items-center gap-2">📊 Subject-wise Compilation Report</h3>
+                    <h3 class="text-xl font-black text-amber-400 mb-6">📊 Subject-wise Compilation</h3>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <template x-for="sub in studentDashData.summary">
                             <div class="bg-slate-800/80 p-4 rounded-2xl border border-slate-700">
@@ -1851,9 +1689,8 @@ def home():
                     </div>
                 </div>
 
-                <!-- Leave Status Inbox for Student -->
                 <div class="glass-card p-6 rounded-3xl">
-                    <h3 class="text-xl font-black text-sky-400 mb-4 flex items-center gap-2">✉️ My Submitted Leave Applications</h3>
+                    <h3 class="text-xl font-black text-sky-400 mb-4">✉️ My Submitted Leave Applications</h3>
                     <div class="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
                         <template x-for="l in (studentDashData.leaves || [])">
                             <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-700 text-xs">
@@ -1867,7 +1704,7 @@ def home():
                                           x-text="l.status"></span>
                                 </div>
                                 <p class="text-slate-400 mb-1"><b>Duration:</b> <span class="text-slate-200" x-text="l.from_date + ' to ' + l.to_date"></span></p>
-                                <p class="text-slate-300 italic mb-2">"<span x-text="l.reason"></span>"</p>
+                                <p class="text-slate-300 italic mb-2" x-text="'\"' + l.reason + '\"'"></p>
                                 <div x-show="l.faculty_remark" class="bg-slate-950 p-2.5 rounded-xl border border-sky-500/30 text-sky-300">
                                     <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
                                 </div>
@@ -1876,110 +1713,52 @@ def home():
                         <p x-show="!studentDashData.leaves || studentDashData.leaves.length === 0" class="text-slate-500 text-center py-4">No leave applications submitted yet.</p>
                     </div>
                 </div>
-
-                <!-- Complete Attendance History -->
-                <div class="glass-card p-6 rounded-3xl">
-                    <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Daily Attendance Register (P/A History)</h3>
-                    <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
-                        <table class="w-full text-left text-sm">
-                            <thead class="sticky top-0 bg-slate-900/90 text-sky-400 font-bold backdrop-blur">
-                                <tr>
-                                    <th class="p-3 rounded-tl-lg">Date</th>
-                                    <th class="p-3">Subject</th>
-                                    <th class="p-3 text-center rounded-tr-lg">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody class="text-slate-200 font-semibold">
-                                <template x-for="rec in studentDashData.history">
-                                    <tr class="border-b border-slate-700/50 hover:bg-slate-800/50">
-                                        <td class="p-3" x-text="rec.date"></td>
-                                        <td class="p-3" x-text="rec.subject"></td>
-                                        <td class="p-3 text-center">
-                                            <span class="px-3 py-1 rounded-full text-xs font-black shadow"
-                                                  :class="rec.status === 'Present' ? 'bg-emerald-900 text-emerald-400 border border-emerald-500' : 'bg-red-900 text-red-400 border border-red-500'"
-                                                  x-text="rec.status === 'Present' ? 'P' : 'A'"></span>
-                                        </td>
-                                    </tr>
-                                </template>
-                                <tr x-show="studentDashData.history.length === 0">
-                                    <td colspan="3" class="text-center p-6 text-slate-500">No attendance records found yet.</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
             </div>
         </div>
 
-        <!-- ============================================== -->
-        <!-- EMAIL STYLE LEAVE APPLICATION MODAL -->
-        <!-- ============================================== -->
+        <!-- LEAVE APPLICATION MODAL -->
         <div x-show="openLeaveModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" style="display: none;">
-            <div class="bg-slate-900 border-2 border-sky-400 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl animate-fade">
-                <!-- Email Window Top Bar -->
+            <div class="bg-slate-900 border-2 border-sky-400 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl">
                 <div class="bg-slate-950 px-6 py-4 border-b border-slate-800 flex justify-between items-center">
-                    <div class="flex items-center gap-2">
-                        <span class="w-3 h-3 rounded-full bg-red-500 inline-block"></span>
-                        <span class="w-3 h-3 rounded-full bg-yellow-500 inline-block"></span>
-                        <span class="w-3 h-3 rounded-full bg-emerald-500 inline-block"></span>
-                        <span class="text-sky-400 font-black text-sm ml-2">✉️ New Leave Application Compose Mail</span>
-                    </div>
+                    <span class="text-sky-400 font-black text-sm">✉️ Compose Leave Application</span>
                     <button @click="openLeaveModal = false" class="text-slate-400 hover:text-white font-bold text-xl">&times;</button>
                 </div>
-
                 <form @submit.prevent="submitLeaveApplication" class="p-6 space-y-4">
-                    <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center gap-3 text-xs">
-                        <span class="text-slate-400 font-bold">To:</span>
-                        <span class="text-emerald-400 font-mono font-bold" x-text="'Faculty Class ID (' + studentDashData?.faculty_id + ')'"></span>
-                    </div>
-                    <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center gap-3 text-xs">
-                        <span class="text-slate-400 font-bold">From:</span>
-                        <span class="text-sky-300 font-bold" x-text="studentDashData?.student.name + ' (' + studentDashData?.student.reg_no + ')'"></span>
-                    </div>
-
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label class="block text-sky-400 font-bold text-xs mb-1">Leave Category</label>
                             <select x-model="leaveForm.leave_type" class="w-full p-2.5 rounded-xl text-xs" required>
                                 <option>🏥 Sick / Medical Leave</option>
-                                <option>🎉 College Event / Fest Leave</option>
-                                <option>✈️ Family / Personal Reason</option>
-                                <option>💼 Academic / Project Activity</option>
+                                <option>🎉 College Event Leave</option>
+                                <option>✈️ Personal Leave</option>
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sky-400 font-bold text-xs mb-1">Subject / Course Context</label>
-                            <input type="text" x-model="leaveForm.subject" placeholder="e.g. All Subjects or SAD / BE" class="w-full p-2.5 rounded-xl text-xs" required>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">Subject / Context</label>
+                            <input type="text" x-model="leaveForm.subject" placeholder="e.g. All Subjects" class="w-full p-2.5 rounded-xl text-xs" required>
                         </div>
                     </div>
-
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sky-400 font-bold text-xs mb-1">Leave From Date</label>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">From Date</label>
                             <input type="date" x-model="leaveForm.from_date" class="w-full p-2.5 rounded-xl text-xs" required>
                         </div>
                         <div>
-                            <label class="block text-sky-400 font-bold text-xs mb-1">Leave To Date</label>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">To Date</label>
                             <input type="date" x-model="leaveForm.to_date" class="w-full p-2.5 rounded-xl text-xs" required>
                         </div>
                     </div>
-
                     <div>
-                        <label class="block text-sky-400 font-bold text-xs mb-1">Application Letter / Reason Body</label>
-                        <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Faculty, I am writing to formally request leave because..." required class="w-full p-3 rounded-xl text-xs font-normal"></textarea>
+                        <label class="block text-sky-400 font-bold text-xs mb-1">Reason / Statement</label>
+                        <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Sir/Madam, I am applying for leave..." required class="w-full p-3 rounded-xl text-xs font-normal"></textarea>
                     </div>
-
                     <div class="flex justify-end gap-3 pt-2">
-                        <button type="button" @click="openLeaveModal = false" class="px-5 py-2.5 rounded-xl text-slate-400 hover:bg-slate-800 text-xs font-bold">Discard</button>
-                        <button type="submit" class="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-black px-6 py-2.5 rounded-xl shadow-lg transition text-xs flex items-center gap-2">
-                            🚀 Send to Faculty Dashboard
-                        </button>
+                        <button type="button" @click="openLeaveModal = false" class="px-5 py-2.5 rounded-xl text-slate-400 text-xs font-bold">Cancel</button>
+                        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-6 py-2.5 rounded-xl shadow text-xs">🚀 Send to Faculty</button>
                     </div>
                 </form>
             </div>
         </div>
-
     </div>
 
     <script>
@@ -1987,15 +1766,14 @@ def home():
             let now = new Date();
             let mList = ['January','February','March','April','May','June','July','August','September','October','November','December'];
             let yList = ['2025', '2026', '2027'];
-
             let curMonth = mList[now.getMonth()];
             let curYear = String(now.getFullYear());
             let curDate = now.toISOString().split('T')[0];
 
             return {
                 loggedIn: false,
-                userRole: '', 
-                authRole: 'faculty', 
+                userRole: '',
+                authRole: 'faculty',
                 isLogin: true,
                 authForm: { username: '', password: '' },
                 studentForm: { reg_no: '', name: '' },
@@ -2056,24 +1834,13 @@ def home():
                 studentDashData: null,
                 tableSearchQuery: '',
                 reportSearchQuery: '',
-                skippedImports: [],
 
-                // LEAVE SYSTEM STATES
                 openLeaveModal: false,
-                leaveForm: {
-                    leave_type: '🏥 Sick / Medical Leave',
-                    subject: 'All Subjects',
-                    from_date: curDate,
-                    to_date: curDate,
-                    reason: ''
-                },
+                leaveForm: { leave_type: '🏥 Sick / Medical Leave', subject: 'All Subjects', from_date: curDate, to_date: curDate, reason: '' },
                 facultyLeaves: [],
                 leaveRemarkInput: {},
 
-                init() {
-                    this.syncFromDate();
-                },
-
+                init() { this.syncFromDate(); },
                 syncFromDate() {
                     if (!this.selectedDate) return;
                     let parts = this.selectedDate.split('-');
@@ -2090,18 +1857,15 @@ def home():
                         }
                     }
                 },
-
                 syncToLive() {
                     this.tableMonth = this.selectedMonth;
                     this.tableYear = this.selectedYear;
                     this.reportMonth = this.selectedMonth;
                     this.reportYear = this.selectedYear;
                 },
-
                 get pendingLeavesCount() {
                     return this.facultyLeaves.filter(l => l.status === 'Pending').length;
                 },
-
                 async submitAuth() {
                     let endpoint = this.isLogin ? '/api/login' : '/api/register';
                     let formData = new FormData();
@@ -2118,13 +1882,12 @@ def home():
                             this.loadData();
                             this.loadFacultyLeaves();
                         } else {
-                            this.authError = data.detail || "Authentication Failed. Please try again.";
+                            this.authError = data.detail || "Authentication Failed.";
                         }
                     } catch(e) {
-                        this.authError = "Server Connection Error. Check Backend.";
+                        this.authError = "Server Connection Error.";
                     }
                 },
-
                 async submitStudentAuth() {
                     let formData = new FormData();
                     formData.append('reg_no', this.studentForm.reg_no);
@@ -2145,7 +1908,6 @@ def home():
                         this.authError = "Server Connection Error.";
                     }
                 },
-
                 async loadStudentDashboard(fac_id, reg_no) {
                     try {
                         let res = await fetch(`/api/student_dashboard_data/${fac_id}/${reg_no}`);
@@ -2160,7 +1922,6 @@ def home():
                         alert("Error loading dashboard data.");
                     }
                 },
-
                 async submitLeaveApplication() {
                     if (!this.studentDashData) return;
                     let formData = new FormData();
@@ -2188,17 +1949,15 @@ def home():
                         alert("Error connecting to server.");
                     }
                 },
-
                 async loadFacultyLeaves() {
                     try {
                         let res = await fetch(`/api/leaves/${this.userId}`);
                         let data = await res.json();
                         this.facultyLeaves = data.leaves || [];
                     } catch(e) {
-                        console.error("Error loading leave applications: ", e);
+                        console.error(e);
                     }
                 },
-
                 async respondLeave(leaveId, status) {
                     let remark = this.leaveRemarkInput[leaveId] || "";
                     let formData = new FormData();
@@ -2217,10 +1976,9 @@ def home():
                             alert("Error: " + data.detail);
                         }
                     } catch(e) {
-                        alert("Network error updating leave status.");
+                        alert("Network error.");
                     }
                 },
-
                 async loadData() {
                     try {
                         let res = await fetch(`/api/data/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}&target_date=${this.selectedDate}`);
@@ -2241,10 +1999,9 @@ def home():
                         this.students = data.students;
                         if (this.students.length > 0) this.fetchStudentDetails();
                     } catch(e) {
-                        console.error("Dashboard Load Error: ", e);
+                        console.error(e);
                     }
                 },
-
                 async loadTableData() {
                     if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
                     let res = await fetch(`/api/attendance_table/${this.userId}?month=${this.tableMonth}&year=${this.tableYear}&subject=${this.tableSubject}`);
@@ -2253,35 +2010,19 @@ def home():
                     this.tableRows = data.table_data;
                     this.tableTotalClasses = data.total_classes;
                 },
-
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day];
-                    let nextStatus = '';
-                    let displayVal = '';
-
-                    if (current === 'P') {
-                        nextStatus = 'Absent';
-                        displayVal = 'A';
-                    } else if (current === 'A') {
-                        nextStatus = 'Clear';
-                        displayVal = '';
-                    } else {
-                        nextStatus = 'Present';
-                        displayVal = 'P';
-                    }
-
+                    let nextStatus = current === 'P' ? 'Absent' : (current === 'A' ? 'Clear' : 'Present');
+                    let displayVal = current === 'P' ? 'A' : (current === 'A' ? '' : 'P');
                     student.days[day] = displayVal;
 
                     let distinctDays = new Set();
                     for (let s of this.tableRows) {
                         for (let d = 1; d <= this.tableNumDays; d++) {
-                            if (s.days[d] === 'P' || s.days[d] === 'A') {
-                                distinctDays.add(d);
-                            }
+                            if (s.days[d] === 'P' || s.days[d] === 'A') distinctDays.add(d);
                         }
                     }
                     this.tableTotalClasses = distinctDays.size;
-
                     for (let s of this.tableRows) {
                         let pCount = 0;
                         for (let d = 1; d <= this.tableNumDays; d++) {
@@ -2292,7 +2033,6 @@ def home():
 
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', student.id);
@@ -2302,52 +2042,30 @@ def home():
 
                     try {
                         let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        if (!res.ok) {
-                            let err = await res.json();
-                            alert("Error updating attendance: " + err.detail);
-                            this.loadTableData(); 
-                        }
+                        if (!res.ok) this.loadTableData();
                     } catch(e) {
-                        alert("Network error while updating attendance. Please check your connection.");
                         this.loadTableData();
                     }
                 },
-
                 async loadReportData() {
                     let res = await fetch(`/api/compile_report/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`);
                     let data = await res.json();
                     this.reportSubjects = data.subjects;
                     this.reportRows = data.report;
                 },
-
                 get currentStudent() {
                     return this.students[this.currentIndex] || { name: '', reg_no: '', roll_no: '' };
                 },
-
                 get filteredTableRows() {
-                    if (this.tableSearchQuery.trim() === '') {
-                        return this.tableRows;
-                    }
+                    if (this.tableSearchQuery.trim() === '') return this.tableRows;
                     let q = this.tableSearchQuery.toLowerCase();
-                    return this.tableRows.filter(st => 
-                        (st.name && st.name.toLowerCase().includes(q)) || 
-                        (st.reg_no && st.reg_no.toLowerCase().includes(q)) ||
-                        (st.roll_no && String(st.roll_no).toLowerCase().includes(q))
-                    );
+                    return this.tableRows.filter(st => (st.name && st.name.toLowerCase().includes(q)) || (st.reg_no && st.reg_no.toLowerCase().includes(q)) || (st.roll_no && String(st.roll_no).toLowerCase().includes(q)));
                 },
-
                 get filteredReportRows() {
-                    if (this.reportSearchQuery.trim() === '') {
-                        return this.reportRows;
-                    }
+                    if (this.reportSearchQuery.trim() === '') return this.reportRows;
                     let q = this.reportSearchQuery.toLowerCase();
-                    return this.reportRows.filter(st => 
-                        (st.name && st.name.toLowerCase().includes(q)) || 
-                        (st.reg_no && st.reg_no.toLowerCase().includes(q)) ||
-                        (st.roll_no && String(st.roll_no).toLowerCase().includes(q))
-                    );
+                    return this.reportRows.filter(st => (st.name && st.name.toLowerCase().includes(q)) || (st.reg_no && st.reg_no.toLowerCase().includes(q)) || (st.roll_no && String(st.roll_no).toLowerCase().includes(q)));
                 },
-
                 async fetchStudentDetails() {
                     let reg = this.currentStudent.reg_no;
                     if (!reg) return;
@@ -2356,7 +2074,6 @@ def home():
                     this.currentStudentDetails = data;
                     this.currentStudentPhoto = data.photo_data;
                 },
-
                 async markStatusBtn(status) {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -2373,11 +2090,9 @@ def home():
                         }
                         this.loadData();
                     } else {
-                        let err = await res.json();
-                        alert("Error saving attendance: " + err.detail);
+                        alert("Error saving attendance");
                     }
                 },
-
                 searchByReg() {
                     let idx = this.students.findIndex(s => s.reg_no.toLowerCase().includes(this.searchReg.toLowerCase()));
                     if (idx !== -1) {
@@ -2385,21 +2100,18 @@ def home():
                         this.fetchStudentDetails();
                     }
                 },
-
                 nextStudent() {
                     if (this.currentIndex < this.students.length - 1) {
                         this.currentIndex++;
                         this.fetchStudentDetails();
                     }
                 },
-
                 prevStudent() {
                     if (this.currentIndex > 0) {
                         this.currentIndex--;
                         this.fetchStudentDetails();
                     }
                 },
-
                 async addStudent() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -2414,10 +2126,9 @@ def home():
                         this.loadData();
                     } else {
                         let err = await res.json();
-                        alert("Error adding student: " + err.detail);
+                        alert("Error: " + err.detail);
                     }
                 },
-
                 async deleteStudent() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -2430,62 +2141,44 @@ def home():
                         this.loadData();
                     } else {
                         let err = await res.json();
-                        alert("Error deleting student: " + err.detail);
+                        alert("Error: " + err.detail);
                     }
                 },
-
                 async deleteAllStudents() {
-                    if (!confirm("WARNING: Are you entirely sure you want to delete ALL students and their attendance data? This action cannot be undone.")) return;
-
+                    if (!confirm("Are you sure? This cannot be undone.")) return;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
-
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);
                         this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error deleting records: " + err.detail);
                     }
                 },
-
                 async importStudentsOnly() {
-                    this.skippedImports = [];
                     let fileInput = document.getElementById('studentOnlyFile');
-                    if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
-
+                    if (fileInput.files.length === 0) { alert('Select a file.'); return; }
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
-
                     let res = await fetch('/api/import_students', { method: 'POST', body: formData });
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);
-                        if (data.skipped && data.skipped.length > 0) {
-                            this.skippedImports = data.skipped;
-                        }
                         this.loadData();
                     } else {
                         let err = await res.json();
-                        alert('Import failed: ' + err.detail);
+                        alert("Error: " + err.detail);
                     }
                 },
-
                 async importAttendanceOnly() {
                     let fileInput = document.getElementById('attendanceFile');
-                    if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
-                    if (!this.importSubject) { alert('Please select a subject.'); return; }
-                    if (!this.importDate) { alert('Please select a date.'); return; }
-
+                    if (fileInput.files.length === 0) { alert('Select a file.'); return; }
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
                     formData.append('subject', this.importSubject);
                     formData.append('date_str', this.importDate);
-
                     let res = await fetch('/api/import_attendance', { method: 'POST', body: formData });
                     if (res.ok) {
                         let data = await res.json();
@@ -2493,10 +2186,9 @@ def home():
                         this.loadData();
                     } else {
                         let err = await res.json();
-                        alert('Import failed: ' + err.detail);
+                        alert("Error: " + err.detail);
                     }
                 },
-
                 async executeReset() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -2504,53 +2196,36 @@ def home():
                     formData.append('subject', this.resetSubject);
                     if (this.resetScope === 'single') formData.append('reg_no', this.resetReg);
                     if (this.resetScope === 'date') formData.append('date_str', this.resetDate);
-
                     let res = await fetch('/api/reset_attendance', { method: 'POST', body: formData });
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);
                         this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error resetting data: " + err.detail);
                     }
                 },
-
                 async addSubject() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('subject_name', this.newSubject);
                     let res = await fetch('/api/add_subject', { method: 'POST', body: formData });
                     if (res.ok) {
-                        let data = await res.json();
-                        alert(data.message);
                         this.newSubject = '';
                         this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error adding subject: " + err.detail);
                     }
                 },
-
                 async deleteSubject() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('subject_name', this.delSubject);
                     let res = await fetch('/api/delete_subject', { method: 'POST', body: formData });
                     if (res.ok) {
-                        let data = await res.json();
-                        alert(data.message);
                         this.delSubject = '';
                         this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error deleting subject: " + err.detail);
                     }
                 },
-
                 async uploadLogo() {
                     let fileInput = document.getElementById('logoFile');
-                    if (fileInput.files.length === 0) { alert('Please select a logo file.'); return; }
+                    if (fileInput.files.length === 0) return;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
@@ -2559,12 +2234,8 @@ def home():
                         let data = await res.json();
                         this.collegeLogo = data.logo_url;
                         alert(data.message);
-                    } else {
-                        let err = await res.json();
-                        alert("Error uploading logo: " + err.detail);
                     }
                 },
-
                 async saveCollegeProfile() {
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -2577,14 +2248,10 @@ def home():
                         let data = await res.json();
                         alert(data.message);
                         this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error saving profile: " + err.detail);
                     }
                 },
-
                 async saveStudentProfile() {
-                    if (!this.profileReg) { alert('Please select a student first.'); return; }
+                    if (!this.profileReg) return;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('reg_no', this.profileReg);
@@ -2593,55 +2260,29 @@ def home():
                     formData.append('parent_name', this.profileForm.parent_name);
                     formData.append('parent_contact', this.profileForm.parent_contact);
                     formData.append('res_type', this.profileForm.res_type);
-
                     let photoInput = document.getElementById('studentPhotoFile');
-                    if (photoInput.files.length > 0) {
-                        formData.append('file', photoInput.files[0]);
-                    }
-
+                    if (photoInput.files.length > 0) formData.append('file', photoInput.files[0]);
                     let res = await fetch('/api/save_student_profile', { method: 'POST', body: formData });
                     if (res.ok) {
-                        let data = await res.json();
-                        alert(data.message);
+                        alert("Saved!");
                         this.fetchStudentDetails();
-                    } else {
-                        let err = await res.json();
-                        alert("Error saving student profile: " + err.detail);
                     }
                 },
-
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
-
-                    try {
-                        let response = await fetch(pdfUrl);
-                        let blob = await response.blob();
-                        let file = new File([blob], fileName, {type: "application/pdf"});
-
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ files: [file] });
-                            return; 
-                        } else {
-                            throw new Error("Sharing not supported");
-                        }
-                    } catch(e) {
-                        let a = document.createElement('a');
-                        a.href = pdfUrl;
-                        a.download = fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        alert("PDF Downloaded successfully! You can now manually share the file.");
-                    }
+                    let a = document.createElement('a');
+                    a.href = pdfUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
                 },
-
                 logout() {
                     this.loggedIn = false;
                     this.userRole = '';
                     this.userId = '';
                     this.studentDashData = null;
-                    this.skippedImports = []; 
                     this.facultyLeaves = [];
                 }
             }

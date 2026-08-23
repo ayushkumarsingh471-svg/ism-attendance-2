@@ -57,6 +57,7 @@ def init_tenant_db(user_id):
     t_attendance = f"{safe_uid}_attendance"
     t_settings = f"{safe_uid}_settings"
     t_details = f"{safe_uid}_student_details"
+    t_leaves = f"{safe_uid}_leaves"
 
     with engine.begin() as conn:
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_students} (id SERIAL PRIMARY KEY, reg_no TEXT UNIQUE, roll_no TEXT, name TEXT)'))
@@ -72,11 +73,24 @@ def init_tenant_db(user_id):
             res_type TEXT,
             photo_data TEXT
         )'''))
+        conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_leaves} (
+            id SERIAL PRIMARY KEY,
+            reg_no TEXT,
+            student_name TEXT,
+            leave_type TEXT,
+            subject_name TEXT,
+            from_date TEXT,
+            to_date TEXT,
+            reason TEXT,
+            status TEXT DEFAULT 'Pending',
+            faculty_remark TEXT DEFAULT '',
+            created_at TEXT
+        )'''))
         try:
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
         except:
             pass
-        
+
         res = conn.execute(text(f"SELECT COUNT(*) FROM {t_subjects}")).fetchone()[0]
         if res == 0:
             for sub in ['SAD', 'PST&PC', 'NT', 'BE', 'OS&UNIX LAB', 'PROG IN C LAB']:
@@ -109,12 +123,11 @@ def register(username: str = Form(...), password: str = Form(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Faculty ID already exists. Please choose another.")
 
-# --- NEW: STUDENT LOGIN (GLOBAL SEARCH) ---
 @app.post("/api/student_login")
 def student_login(reg_no: str = Form(...), name: str = Form(...)):
     r_no = reg_no.strip()
     s_name = name.strip()
-    
+
     with engine.begin() as conn:
         faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
         for fac in faculties:
@@ -122,14 +135,13 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
             safe_uid = get_safe_prefix(f_id)
             t_students = f"{safe_uid}_students"
             try:
-                # Basic check to avoid errors if table doesn't exist
                 conn.execute(text(f"SELECT 1 FROM {t_students} LIMIT 1"))
                 st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
                 if st:
                     return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
             except Exception:
                 continue
-                
+
     raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
 
 @app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
@@ -139,6 +151,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
     t_subjects = f"{safe_uid}_subjects"
     t_attendance = f"{safe_uid}_attendance"
     t_settings = f"{safe_uid}_settings"
+    t_leaves = f"{safe_uid}_leaves"
 
     with engine.begin() as conn:
         st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
@@ -167,27 +180,118 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         recent_records = conn.execute(text(f"""
             SELECT sub.subject_name, a.date, a.status 
-            FROM {t_attendance} a
-            JOIN {t_subjects} sub ON a.subject_id = sub.id
-            WHERE a.student_id = :sid
+            FROM {t_attendance} a 
+            JOIN {t_subjects} sub ON a.subject_id = sub.id 
+            WHERE a.student_id = :sid 
             ORDER BY a.date DESC
         """), {"sid": st_id}).fetchall()
 
         history = [{"subject": r[0], "date": r[1], "status": r[2]} for r in recent_records]
+
+        try:
+            leave_records = conn.execute(text(f"""
+                SELECT id, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at 
+                FROM {t_leaves} WHERE reg_no = :r ORDER BY id DESC
+            """), {"r": reg_no}).fetchall()
+            leaves = [{
+                "id": lr[0], "leave_type": lr[1], "subject": lr[2], "from_date": lr[3], 
+                "to_date": lr[4], "reason": lr[5], "status": lr[6], "faculty_remark": lr[7] or '', "created_at": lr[8]
+            } for lr in leave_records]
+        except Exception:
+            leaves = []
 
         def get_cfg(k, def_v):
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
             return res[0] if res and res[0] else def_v
 
         return {
+            "faculty_id": faculty_id,
             "student": {"name": st_name, "reg_no": reg_no, "roll_no": st_roll},
             "overall_pct": overall_pct,
             "summary": summary,
             "history": history,
+            "leaves": leaves,
             "college_name": get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)'),
             "course": get_cfg('course_name', 'BCA') + " - " + get_cfg('section_name', 'Semester 1'),
             "logo": get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
         }
+
+# ==========================================
+# LEAVE MANAGEMENT APIS
+# ==========================================
+
+@app.post("/api/apply_leave")
+def apply_leave(
+    faculty_id: str = Form(...),
+    reg_no: str = Form(...),
+    student_name: str = Form(...),
+    leave_type: str = Form(...),
+    subject_name: str = Form(...),
+    from_date: str = Form(...),
+    to_date: str = Form(...),
+    reason: str = Form(...)
+):
+    try:
+        safe_uid = get_safe_prefix(faculty_id)
+        t_leaves = f"{safe_uid}_leaves"
+        c_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, created_at)
+                VALUES (:r, :n, :lt, :sub, :fd, :td, :re, 'Pending', :ca)
+            """), {
+                "r": reg_no.strip(), "n": student_name.strip(), "lt": leave_type.strip(),
+                "sub": subject_name.strip(), "fd": from_date.strip(), "td": to_date.strip(),
+                "re": reason.strip(), "ca": c_time
+            })
+        return {"success": True, "message": "Leave application sent successfully to your Faculty portal!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
+
+@app.get("/api/get_leaves/{user_id}")
+def get_leaves(user_id: str):
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_leaves = f"{safe_uid}_leaves"
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {t_leaves} (
+                    id SERIAL PRIMARY KEY,
+                    reg_no TEXT,
+                    student_name TEXT,
+                    leave_type TEXT,
+                    subject_name TEXT,
+                    from_date TEXT,
+                    to_date TEXT,
+                    reason TEXT,
+                    status TEXT DEFAULT 'Pending',
+                    faculty_remark TEXT DEFAULT '',
+                    created_at TEXT
+                )
+            """))
+            rows = conn.execute(text(f"SELECT id, reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at FROM {t_leaves} ORDER BY id DESC")).fetchall()
+        
+        leaves_list = [{
+            "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3],
+            "subject_name": r[4], "from_date": r[5], "to_date": r[6], "reason": r[7],
+            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10]
+        } for r in rows]
+        return {"leaves": leaves_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
+
+@app.post("/api/update_leave_status")
+def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), status: str = Form(...), remark: str = Form("")):
+    try:
+        safe_uid = get_safe_prefix(user_id)
+        t_leaves = f"{safe_uid}_leaves"
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                UPDATE {t_leaves} SET status = :st, faculty_remark = :rem WHERE id = :lid
+            """), {"st": status.strip(), "rem": remark.strip(), "lid": leave_id})
+        return {"success": True, "message": f"Leave status updated to {status} with message."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
 # FACULTY CORE API
@@ -222,6 +326,19 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         students = sort_students_safely(students_raw)
         st_list = [{"id": s[0], "reg_no": s[1], "roll_no": s[2], "name": s[3]} for s in students]
 
+        # Defaulters evaluation
+        defaulters = []
+        if tc_count > 0 and sub_id:
+            for s in students:
+                s_id, reg, roll, name = s
+                p_cnt = conn.execute(text(f"SELECT COUNT(*) FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid AND date LIKE :d AND status='Present'"), {"sid": s_id, "subid": sub_id, "d": date_pattern}).fetchone()[0] or 0
+                pct = round((p_cnt / tc_count) * 100)
+                if pct < 75:
+                    defaulters.append({"reg_no": reg, "roll_no": roll, "name": name, "present": p_cnt, "total": tc_count, "pct": pct})
+        elif tc_count == 0 and len(students) > 0:
+            for s in students:
+                defaulters.append({"reg_no": s[1], "roll_no": s[2], "name": s[3], "present": 0, "total": 0, "pct": 0})
+
         def get_cfg(k, def_v):
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
             return res[0] if res and res[0] else def_v
@@ -237,6 +354,8 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         "subjects": subjects,
         "classes_conducted": tc_count,
         "present_today": present_today,
+        "defaulters_count": len(defaulters),
+        "defaulters": defaulters,
         "students": st_list,
         "college_name": c_name,
         "app_subtitle": c_sub,
@@ -262,17 +381,17 @@ def get_attendance_table(user_id: str, month: str = "July", year: int = 2026, su
 
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
-        
+
         att_map = {}
         tc_count = 0
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
             records = conn.execute(text(f"""
                 SELECT s.reg_no, a.date, a.status FROM {t_attendance} a 
-                JOIN {t_students} s ON a.student_id = s.id
-                WHERE a.subject_id = :sid AND a.date LIKE :d
+                JOIN {t_students} s ON a.student_id = s.id 
+                WHERE a.subject_id = :sid AND a.date LIKE :d 
             """), {"sid": sub_id, "d": date_pattern}).fetchall()
-            
+
             for r_no, d_str, stat in records:
                 try:
                     day_idx = int(d_str.split('-')[2])
@@ -311,17 +430,17 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
 
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
-        
+
         att_map = {}
         tc_count = 0
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
             records = conn.execute(text(f"""
                 SELECT s.reg_no, a.date, a.status FROM {t_attendance} a 
-                JOIN {t_students} s ON a.student_id = s.id
-                WHERE a.subject_id = :sid AND a.date LIKE :d
+                JOIN {t_students} s ON a.student_id = s.id 
+                WHERE a.subject_id = :sid AND a.date LIKE :d 
             """), {"sid": sub_id, "d": date_pattern}).fetchall()
-            
+
             for r_no, d_str, stat in records:
                 try:
                     day_idx = int(d_str.split('-')[2])
@@ -363,7 +482,7 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
-        
+
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
@@ -377,7 +496,7 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
             WHERE status='Present' AND date LIKE :d 
             GROUP BY student_id, subject_id
         """), {"d": date_pattern}).fetchall()
-        
+
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
         report = []
@@ -393,7 +512,7 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
                 tot_c_all += tot_c
                 pct = round((tot_p / tot_c * 100)) if tot_c > 0 else 0
                 row["subs"][sub] = f"{tot_p}/{tot_c} ({pct}%)"
-            
+
             overall_pct = round((tot_p_all / tot_c_all * 100), 1) if tot_c_all > 0 else 0
             row["overall"] = f"{overall_pct}%"
             report.append(row)
@@ -499,7 +618,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('HeaderTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#0f172a'), alignment=1)
     sub_style = ParagraphStyle('HeaderSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#d97706'), alignment=1)
-    
+
     elements.append(Paragraph(college_name, title_style))
     elements.append(Paragraph(f"CONSOLIDATED ATTENDANCE REPORT — {month.upper()} {year}", sub_style))
     elements.append(Spacer(1, 10))
@@ -594,6 +713,10 @@ def delete_all_students(user_id: str = Form(...)):
             conn.execute(text(f"DELETE FROM {safe_uid}_attendance"))
             conn.execute(text(f"DELETE FROM {safe_uid}_student_details"))
             conn.execute(text(f"DELETE FROM {safe_uid}_students"))
+            try:
+                conn.execute(text(f"DELETE FROM {safe_uid}_leaves"))
+            except:
+                pass
         return {"success": True, "message": "All students and their records deleted successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
@@ -630,9 +753,8 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
         safe_uid = get_safe_prefix(user_id)
         t_students = f"{safe_uid}_students"
         reg_clean = reg_no.strip()
-        
+
         with engine.begin() as conn:
-            # Check global uniqueness across all faculties
             faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
             for fac in faculties:
                 f_id = fac[0]
@@ -647,7 +769,7 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
                     raise
                 except Exception:
                     pass
-            
+
             conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_clean, "ro": roll_no.strip(), "n": name.strip()})
         return {"success": True, "message": "Student added successfully!"}
     except HTTPException:
@@ -666,27 +788,26 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-
 @app.post("/api/import_students")
 async def import_students(user_id: str = Form(...), file: UploadFile = File(...)):
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
     contents = await file.read()
-    
+
     try:
         if file.filename.endswith('.csv'): 
             df_raw = pd.read_csv(io.BytesIO(contents))
         else: 
             df_raw = pd.read_excel(io.BytesIO(contents))
-            
+
         def clean_col(c):
             return re.sub(r'[^a-zA-Z0-9]', '', str(c).lower())
-            
+
         cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
         cols = list(df_raw.columns)
-        
+
         mapped_reg, mapped_roll, mapped_name = None, None, None
-        
+
         for orig_col, clean_name in cleaned_cols.items():
             if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
                 mapped_reg = orig_col
@@ -694,7 +815,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                 mapped_roll = orig_col
             elif not mapped_name and ('name' in clean_name or 'student' in clean_name):
                 mapped_name = orig_col
-                
+
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
         if not mapped_roll and len(cols) > 1: mapped_roll = cols[1]
         if not mapped_name and len(cols) > 2: mapped_name = cols[2]
@@ -706,7 +827,6 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
         skipped_list = []
 
         with engine.begin() as conn:
-            # Pre-fetch existing Reg Nos from all OTHER classes
             other_regs = set()
             faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
             for fac in faculties:
@@ -725,7 +845,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                 reg = str(row.get(mapped_reg, "")).strip()
                 if reg.endswith('.0'): reg = reg[:-2]
                 if reg.lower() == 'nan': reg = ""
-                
+
                 roll = str(row.get(mapped_roll, "")) if mapped_roll else ""
                 roll = roll.strip()
                 if roll.endswith('.0'): roll = roll[:-2]
@@ -733,12 +853,12 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
 
                 name = str(row.get(mapped_name, "")).strip()
                 if name.lower() == 'nan': name = ""
-                
+
                 if reg and name:
                     if reg.lower() in other_regs:
                         skipped_list.append(f"{reg} - {name}")
                         continue
-                        
+
                     conn.execute(text(f"""
                         INSERT INTO {t_students} (reg_no, roll_no, name) 
                         VALUES (:r, :ro, :n) 
@@ -746,14 +866,13 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
                         DO UPDATE SET roll_no = EXCLUDED.roll_no, name = EXCLUDED.name
                     """), {"r": reg, "ro": roll, "n": name})
                     inserted_students += 1
-                    
+
         return {"success": True, "message": f"Successfully registered {inserted_students} students.", "skipped": skipped_list}
-        
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail="Import Failed: " + str(e))
-
 
 @app.post("/api/import_attendance")
 async def import_attendance(user_id: str = Form(...), file: UploadFile = File(...), subject: str = Form(...), date_str: str = Form(...)):
@@ -762,21 +881,21 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
     t_subjects = f"{safe_uid}_subjects"
     t_attendance = f"{safe_uid}_attendance"
     contents = await file.read()
-    
+
     try:
         if file.filename.endswith('.csv'): 
             df_raw = pd.read_csv(io.BytesIO(contents))
         else: 
             df_raw = pd.read_excel(io.BytesIO(contents))
-            
+
         def clean_col(c):
             return re.sub(r'[^a-zA-Z0-9]', '', str(c).lower())
-            
+
         cleaned_cols = {col: clean_col(col) for col in df_raw.columns}
         cols = list(df_raw.columns)
-        
+
         mapped_reg, mapped_name, mapped_att = None, None, None
-        
+
         for orig_col, clean_name in cleaned_cols.items():
             if not mapped_reg and ('reg' in clean_name or 'enrol' in clean_name or 'id' in clean_name):
                 mapped_reg = orig_col
@@ -791,15 +910,15 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 mapped_att = int(target_day)
         except:
             pass
-            
+
         if not mapped_att:
             for orig_col, clean_name in cleaned_cols.items():
                 if ('att' in clean_name or 'stat' in clean_name or 'pa' in clean_name or 'mark' in clean_name or 'present' in clean_name):
                     mapped_att = orig_col
                     break
-                    
+
         if not mapped_reg and len(cols) > 0: mapped_reg = cols[0]
-        
+
         if not mapped_att and len(cols) > 1: 
             if cols[-1] == 'Overall %' and len(cols) > 2:
                 mapped_att = cols[-2]
@@ -820,7 +939,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 reg = str(row.get(mapped_reg, "")).strip()
                 if reg.endswith('.0'): reg = reg[:-2]
                 if reg.lower() == 'nan': reg = ""
-                
+
                 if reg:
                     att_val = str(row.get(mapped_att, "")).strip().lower()
                     status = ""
@@ -828,7 +947,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                         status = 'Present'
                     elif att_val in ['a', 'absent', '0', 'no', 'false', 'n']:
                         status = 'Absent'
-                        
+
                     if status:
                         s_res = conn.execute(text(f"SELECT id FROM {t_students} WHERE reg_no=:r"), {"r": reg}).fetchone()
                         if s_res:
@@ -840,9 +959,9 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                                 DO UPDATE SET status = :stat
                             """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
                             inserted_att += 1
-                    
+
         return {"success": True, "message": f"Successfully marked attendance for {inserted_att} students on {date_str} for subject {subject}."}
-        
+
     except Exception as e:
         raise HTTPException(status_code=400, detail="Attendance Import Failed: " + str(e))
 
@@ -910,21 +1029,20 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
             if encoded_img:
                 conn.execute(text(f"""
                     INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type, photo_data) 
-                    VALUES (:r, :e, :c, :pn, :pc, :rt, :pd)
+                    VALUES (:r, :e, :c, :pn, :pc, :rt, :pd) 
                     ON CONFLICT (reg_no) 
                     DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type, photo_data = EXCLUDED.photo_data
                 """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type, "pd": encoded_img})
             else:
                 conn.execute(text(f"""
                     INSERT INTO {t_details} (reg_no, email, contact, parent_name, parent_contact, res_type) 
-                    VALUES (:r, :e, :c, :pn, :pc, :rt)
+                    VALUES (:r, :e, :c, :pn, :pc, :rt) 
                     ON CONFLICT (reg_no) 
                     DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type
                 """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type})
         return {"success": True, "message": "Student profile saved successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
-
 
 # --- FULL HTML FRONTEND ---
 @app.get("/", response_class=HTMLResponse)
@@ -944,10 +1062,12 @@ def home():
         @keyframes floatUp { 0% { transform: translateY(0) rotate(0deg) scale(0.9); opacity: 0; } 20% { opacity: 0.5; } 80% { opacity: 0.5; } 100% { transform: translateY(-115vh) rotate(360deg) scale(1.2); opacity: 0; } }
         .glass-card { background: rgba(15, 23, 42, 0.75) !important; backdrop-filter: blur(8px); border: 2px solid rgba(56, 189, 248, 0.3); }
         input, select, textarea { background-color: #e0f2fe !important; color: #0f172a !important; border: 2px solid #38bdf8 !important; font-weight: 800 !important; }
-        input::placeholder { color: #64748b !important; }
+        input::placeholder, textarea::placeholder { color: #64748b !important; }
         .math-grid-table th, .math-grid-table td { border: 2px solid #38bdf8 !important; }
         .math-grid-table th:nth-child(3), .math-grid-table td:nth-child(3) { min-width: 320px !important; text-align: left !important; padding-left: 14px !important; }
         .math-grid-table td:not(:nth-child(3)):not(:nth-child(1)):not(:nth-child(2)) { width: 34px !important; height: 34px !important; min-width: 34px !important; max-width: 34px !important; padding: 2px !important; font-size: 11px !important; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #38bdf8; border-radius: 4px; }
     </style>
 </head>
 <body x-data="erpApp()">
@@ -963,36 +1083,35 @@ def home():
 
     <!-- MAIN LOGIN SCREEN -->
     <div x-show="!loggedIn" class="flex items-center justify-center min-h-screen p-6 relative z-10">
-        <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-2 gap-10 items-center">
-            
+        <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
+
             <!-- Left Branding Side -->
             <div>
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
                 <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
-                
+
                 <div class="space-y-4">
                     <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">👨‍🏫</div>
                         <div>
                             <p class="text-sky-300 font-bold text-sm">Faculty Login</p>
-                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance and manage records.</p>
+                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance, review leaves & track defaulters.</p>
                         </div>
                     </div>
                     <div class="bg-emerald-950/60 border border-emerald-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">Read-Only access for students to track their attendance reports.</p>
+                            <p class="text-slate-400 text-xs">View percentage, daily log, and apply for leaves with official faculty inbox integration.</p>
                         </div>
                     </div>
                 </div>
             </div>
-            
+
             <!-- Right Login Form Side -->
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
-                
                 <!-- Role Selector Tabs -->
                 <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
                     <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
@@ -1018,9 +1137,9 @@ def home():
                     </form>
                 </div>
 
-                <!-- STUDENT LOGIN FORM (Reg No & Name ONLY) -->
+                <!-- STUDENT LOGIN FORM -->
                 <div x-show="authRole === 'student'">
-                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only Access</p>
+                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only Access & Leave Desk</p>
                     <form @submit.prevent="submitStudentAuth" class="space-y-4">
                         <div>
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
@@ -1041,7 +1160,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- ORIGINAL FACULTY DASHBOARD -->
+    <!-- FACULTY DASHBOARD -->
     <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
@@ -1057,20 +1176,24 @@ def home():
                 </div>
                 <p class="text-slate-400 text-xs font-bold mb-2">Navigate Pages:</p>
                 <nav class="space-y-2 text-sm font-black">
-                    <button @click="currentTab = 'dashboard'; loadData()" :class="currentTab === 'dashboard' ? 'bg-blue-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-blue-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📊 Dashboard</button>
-                    <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
-                    <button @click="currentTab = 'table'; syncToLive(); loadTableData()" :class="currentTab === 'table' ? 'bg-purple-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-purple-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📅 Attendance Table</button>
-                    <button @click="currentTab = 'report'; syncToLive(); loadReportData()" :class="currentTab === 'report' ? 'bg-amber-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-amber-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📑 Monthly Compile Report</button>
-                    <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
-                    <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
-                    <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
+                    <button @click="currentTab = 'dashboard'; loadData()" :class="currentTab === 'dashboard' ? 'bg-blue-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-blue-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📊 Dashboard</button>
+                    <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-950/90'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center justify-between">
+                        <span class="flex items-center gap-2">📬 Leave Requests</span>
+                        <span x-show="pendingLeavesCount > 0" class="bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full text-xs font-black" x-text="pendingLeavesCount"></span>
+                    </button>
+                    <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
+                    <button @click="currentTab = 'table'; syncToLive(); loadTableData()" :class="currentTab === 'table' ? 'bg-purple-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-purple-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📅 Attendance Table</button>
+                    <button @click="currentTab = 'report'; syncToLive(); loadReportData()" :class="currentTab === 'report' ? 'bg-amber-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-amber-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📑 Monthly Compile Report</button>
+                    <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
+                    <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
+                    <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
                 </nav>
             </div>
             <button @click="logout" class="bg-emerald-500 hover:bg-emerald-600 py-3 rounded-xl font-black text-center shadow-lg transition relative z-10">🚪 LOGOUT FROM PORTAL</button>
         </div>
 
         <!-- CONTENT VIEW -->
-        <div class="flex-1 flex flex-col overflow-y-auto p-6">
+        <div class="flex-1 flex flex-col overflow-y-auto p-6 custom-scrollbar">
             <div class="glass-card p-4 rounded-2xl shadow-xl flex items-center gap-4 mb-6 border-b-4 border-amber-500">
                 <img :src="collegeLogo" class="w-16 h-16 object-contain bg-white rounded-lg p-1">
                 <div>
@@ -1079,7 +1202,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 1: DASHBOARD -->
+            <!-- TAB 1: DASHBOARD (WITH DEFAULTERS CARD DIRECTLY UNDER STATS) -->
             <div x-show="currentTab === 'dashboard'">
                 <h2 class="text-xl font-black text-white mb-4 flex items-center gap-2">📊 Monthly Overview & Daily Status</h2>
                 <div class="grid grid-cols-4 gap-4 mb-6">
@@ -1112,6 +1235,8 @@ def home():
                         <input type="date" x-model="selectedDate" @change="syncFromDate(); loadData()" class="w-full p-2.5 rounded-xl">
                     </div>
                 </div>
+
+                <!-- 4 PRIMARY METRIC CARDS -->
                 <div class="grid grid-cols-4 gap-6">
                     <div class="bg-white text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-blue-500">
                         <p class="font-bold text-slate-600">Total Students</p>
@@ -1123,11 +1248,82 @@ def home():
                     </div>
                     <div class="bg-emerald-50 text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-emerald-500">
                         <p class="font-bold text-slate-600">Selected Subject</p>
-                        <h3 class="text-3xl font-black text-emerald-900 mt-2" x-text="selectedSubject"></h3>
+                        <h3 class="text-3xl font-black text-emerald-900 mt-2 truncate" x-text="selectedSubject"></h3>
                     </div>
                     <div class="bg-amber-50 text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-amber-500">
                         <p class="font-bold text-slate-600" x-text="'Present on ' + selectedDate"></p>
                         <h3 class="text-4xl font-black text-amber-900 mt-2" x-text="presentToday"></h3>
+                    </div>
+                </div>
+
+                <!-- --- NEW FEATURE: DEFAULTERS LIST BANNER RIGHT BELOW TOTAL STUDENTS/CLASSES/SUBJECT --- -->
+                <div class="mt-6 bg-gradient-to-r from-red-950 via-slate-900 to-red-950 p-6 rounded-3xl border-2 border-red-500 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-6">
+                    <div class="flex items-center gap-4">
+                        <div class="text-5xl animate-pulse">🚨</div>
+                        <div>
+                            <div class="inline-block bg-red-600 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full mb-1 tracking-wider uppercase">Attendance Alert</div>
+                            <h3 class="text-xl font-black text-white">Defaulters List (< 75% Attendance)</h3>
+                            <p class="text-slate-300 text-xs mt-0.5">Found <b class="text-red-400 font-black text-sm" x-text="defaultersCount"></b> student(s) below required criteria for <b class="text-yellow-300" x-text="selectedSubject"></b> in <b class="text-sky-300" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
+                        </div>
+                    </div>
+                    <button @click="showDefaultersModal = true" class="bg-red-600 hover:bg-red-700 text-white font-black px-6 py-3.5 rounded-2xl shadow-xl transition transform active:scale-95 flex items-center gap-2 text-sm">
+                        <span>📋 VIEW DEFAULTERS LIST</span>
+                        <span class="bg-white text-red-700 px-2 py-0.5 rounded-full text-xs font-black" x-text="defaultersCount"></span>
+                    </button>
+                </div>
+
+            </div>
+
+            <!-- --- TAB: LEAVE REQUESTS (FACULTY INBOX) --- -->
+            <div x-show="currentTab === 'leaves'">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-black text-white flex items-center gap-2">📬 Student Leave Applications & Inquiries</h2>
+                    <button @click="loadFacultyLeaves" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow">🔄 Refresh Inbox</button>
+                </div>
+
+                <div class="space-y-4">
+                    <template x-for="lv in facultyLeaves" :key="lv.id">
+                        <div class="glass-card p-6 rounded-3xl border-2" :class="lv.status === 'Approved' ? 'border-emerald-500/60' : (lv.status === 'Rejected' ? 'border-red-500/60' : 'border-amber-500')">
+                            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-slate-700">
+                                <div class="flex items-center gap-3">
+                                    <div class="text-3xl">✉️</div>
+                                    <div>
+                                        <div class="flex items-center gap-2">
+                                            <h3 class="text-lg font-black text-white" x-text="lv.student_name"></h3>
+                                            <span class="bg-sky-900 text-sky-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="'Reg: ' + lv.reg_no"></span>
+                                            <span class="bg-purple-900 text-purple-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="lv.leave_type"></span>
+                                        </div>
+                                        <p class="text-slate-400 text-xs mt-1" x-text="'Subject: ' + lv.subject_name + ' | Dates: ' + lv.from_date + ' to ' + lv.to_date + ' | Sent: ' + lv.created_at"></p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span class="px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider"
+                                          :class="lv.status === 'Approved' ? 'bg-emerald-600 text-white' : (lv.status === 'Rejected' ? 'bg-red-600 text-white' : 'bg-amber-500 text-slate-950')"
+                                          x-text="lv.status"></span>
+                                </div>
+                            </div>
+
+                            <!-- Reason Body -->
+                            <div class="py-4 text-sm text-slate-200 bg-slate-950/60 p-4 rounded-2xl my-3 border border-slate-800">
+                                <p class="text-xs font-bold text-sky-400 mb-1">Student Application Content / Reason:</p>
+                                <p class="whitespace-pre-line leading-relaxed font-sans" x-text="lv.reason"></p>
+                            </div>
+
+                            <!-- Faculty Reply & Actions -->
+                            <div class="pt-2 flex flex-col md:flex-row gap-4 items-center justify-between">
+                                <div class="w-full md:w-2/3">
+                                    <input type="text" x-model="lv.tempRemark" placeholder="Type message/remark for student (e.g., 'Approved for 2 days. Submit doctor note.')..." class="w-full p-2.5 rounded-xl text-xs">
+                                    <p x-show="lv.faculty_remark" class="text-[11px] text-amber-300 font-semibold mt-1" x-text="'Current Saved Note: ' + lv.faculty_remark"></p>
+                                </div>
+                                <div class="flex gap-2 w-full md:w-auto">
+                                    <button @click="updateLeaveStatus(lv.id, 'Approved', lv.tempRemark)" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">✅ APPROVE</button>
+                                    <button @click="updateLeaveStatus(lv.id, 'Rejected', lv.tempRemark)" class="flex-1 md:flex-none bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">❌ REJECT</button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="facultyLeaves.length === 0" class="text-center p-12 glass-card rounded-3xl text-slate-400 font-bold">
+                        📭 No leave applications submitted yet by students.
                     </div>
                 </div>
             </div>
@@ -1209,10 +1405,10 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (WITH SEARCH) -->
+            <!-- TAB 3: ATTENDANCE TABLE (WITH INLINE EDITOR & SEARCH) -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
-                
+
                 <div class="grid grid-cols-3 gap-4 mb-4">
                     <select x-model="tableMonth" @change="loadTableData()" class="w-full p-2.5 rounded-xl">
                         <template x-for="m in months">
@@ -1230,16 +1426,15 @@ def home():
                         </template>
                     </select>
                 </div>
-                
+
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
 
-                <!-- NEW SEARCH BAR FOR TABLE -->
                 <div class="mb-4">
                     <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
                 </div>
-                
+
                 <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: You can click directly on any box below to toggle Attendance (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
 
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
@@ -1256,14 +1451,11 @@ def home():
                             </tr>
                         </thead>
                         <tbody>
-                            <!-- CHANGED TO FILTERED TABLE ROWS -->
                             <template x-for="st in filteredTableRows">
                                 <tr class="bg-sky-50 hover:bg-sky-200">
                                     <td class="p-3 border sticky left-0 bg-sky-50 z-10" x-text="st.reg_no"></td>
                                     <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
                                     <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
-                                    
-                                    <!-- INLINE EDITING: Clickable Cells -->
                                     <template x-for="d in tableNumDays">
                                         <td class="border text-xs text-center cursor-pointer transition-colors duration-200 select-none" 
                                             title="Click to toggle Present/Absent"
@@ -1272,7 +1464,6 @@ def home():
                                             @click="toggleCellAttendance(st, d)">
                                         </td>
                                     </template>
-                                    
                                     <td class="p-3 border font-black text-blue-800" x-text="st.pct + '%'"></td>
                                 </tr>
                             </template>
@@ -1281,7 +1472,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 4: MONTHLY COMPILE REPORT (WITH SEARCH) -->
+            <!-- TAB 4: MONTHLY COMPILE REPORT -->
             <div x-show="currentTab === 'report'">
                 <h2 class="text-2xl font-black text-white mb-4">📑 Consolidated Monthly Attendance & Percentage Report</h2>
                 <div class="grid grid-cols-2 gap-4 mb-6">
@@ -1296,19 +1487,17 @@ def home():
                         </template>
                     </select>
                 </div>
-                
+
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
                     <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
-                    
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
 
-                <!-- SEARCH BAR FOR COMPILE REPORT -->
                 <div class="mb-6">
                     <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow border-2 border-sky-400 bg-white text-slate-900 font-bold focus:ring-4 focus:ring-sky-500 transition">
                 </div>
-                
+
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center">
                         <thead>
@@ -1323,7 +1512,6 @@ def home():
                             </tr>
                         </thead>
                         <tbody>
-                            <!-- CHANGED TO FILTERED REPORT ROWS -->
                             <template x-for="st in filteredReportRows">
                                 <tr class="border-b bg-sky-50">
                                     <td class="p-3 border" x-text="st.reg_no"></td>
@@ -1370,17 +1558,13 @@ def home():
             <!-- TAB 6: MANAGE STUDENTS -->
             <div x-show="currentTab === 'students'" class="space-y-6">
                 <h2 class="text-2xl font-black text-white mb-2">👥 Database Management</h2>
-                
                 <div class="grid grid-cols-2 gap-6">
-                    <!-- OPTION 1: IMPORT STUDENTS ONLY -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name. (Ignores Attendance).</p>
-                        
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
 
-                        <!-- NEW: Notification for skipped students -->
                         <div x-show="skippedImports.length > 0" class="mt-4 bg-red-900/40 border border-red-500/50 p-4 rounded-xl text-xs" style="display: none;">
                             <h4 class="text-red-400 font-bold mb-2">⚠️ Skipped (Already in another class):</h4>
                             <ul class="list-disc pl-4 text-slate-300 max-h-32 overflow-y-auto custom-scrollbar">
@@ -1391,11 +1575,9 @@ def home():
                         </div>
                     </div>
 
-                    <!-- OPTION 2: IMPORT ATTENDANCE -->
                     <div class="glass-card p-6 rounded-2xl border-2 border-emerald-400">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
                         <p class="text-xs text-slate-300 mb-4">Select Date & Subject, then upload file. It will read "P/A" marks and save them.</p>
-                        
                         <div class="grid grid-cols-2 gap-4 mb-4">
                             <div>
                                 <label class="block text-white font-bold text-xs mb-1">Select Subject</label>
@@ -1410,7 +1592,6 @@ def home():
                                 <input type="date" x-model="importDate" class="w-full p-2.5 rounded-xl text-sm">
                             </div>
                         </div>
-
                         <input type="file" id="attendanceFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-emerald-50 text-slate-900">
                         <button @click="importAttendanceOnly" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow transition">Mark Attendance from File</button>
                     </div>
@@ -1448,14 +1629,12 @@ def home():
                             <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile</button>
                         </form>
                     </div>
-                    
-                    <!-- DANGER ZONE -->
+
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
-                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, and their attendance records from the database for your account.</p>
+                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, their personal details, leave logs and attendance records from the database for your account.</p>
                         <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
                     </div>
-
                 </div>
             </div>
 
@@ -1518,32 +1697,38 @@ def home():
 
 
     <!-- ============================================== -->
-    <!-- MAIN STUDENT READ-ONLY DASHBOARD               -->
+    <!-- MAIN STUDENT READ-ONLY & LEAVE DASHBOARD        -->
     <!-- ============================================== -->
     <div x-show="loggedIn && userRole === 'student'" class="min-h-screen relative z-10 p-4 md:p-8" style="display: none;">
-        
+
         <!-- Header -->
-        <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex justify-between items-center border-t-4 border-emerald-500">
+        <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex flex-col sm:flex-row justify-between items-center gap-4 border-t-4 border-emerald-500">
             <div class="flex items-center gap-4">
-                <img :src="studentDashData?.logo || 'https://i.ibb.co/3s68K1v/tree-logo.png'" class="w-16 h-16 bg-white rounded-xl p-1 shadow">
+                <img :src="studentDashData?.logo || 'https://i.ibb.co/3s68K1v/tree-logo.png'" class="w-16 h-16 bg-white rounded-xl p-1 shadow object-contain">
                 <div>
                     <h1 class="text-2xl font-black text-white" x-text="studentDashData?.college_name"></h1>
                     <p class="text-emerald-400 font-bold text-sm" x-text="studentDashData?.course"></p>
                 </div>
             </div>
-            <button @click="logout" class="bg-red-500 hover:bg-red-600 text-white font-black px-6 py-2 rounded-xl shadow-lg transition">🚪 Logout</button>
+            <div class="flex items-center gap-3">
+                <!-- Apply Leave Email Button -->
+                <button @click="showLeaveModal = true" class="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black px-6 py-2.5 rounded-xl shadow-lg transition flex items-center gap-2 text-sm">
+                    <span>✉️ APPLY LEAVE / EMAIL</span>
+                </button>
+                <button @click="logout" class="bg-red-500 hover:bg-red-600 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition text-sm">🚪 Logout</button>
+            </div>
         </div>
 
         <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8" x-show="studentDashData">
-            
+
             <!-- Left Profile Card -->
-            <div class="col-span-1">
+            <div class="col-span-1 space-y-6">
                 <div class="bg-slate-900 border-2 border-emerald-500/30 p-6 rounded-3xl shadow-2xl text-center">
                     <div class="text-6xl mb-4">🎓</div>
                     <h2 class="text-2xl font-black text-white" x-text="studentDashData.student.name"></h2>
                     <p class="text-sky-300 font-bold mt-1">Roll No: <span x-text="studentDashData.student.roll_no"></span></p>
                     <p class="text-slate-400 font-bold text-xs mt-1">Reg No: <span x-text="studentDashData.student.reg_no"></span></p>
-                    
+
                     <div class="mt-8 pt-6 border-t border-slate-700">
                         <p class="text-slate-400 font-bold text-sm mb-2">Overall Attendance</p>
                         <div class="flex justify-center items-center">
@@ -1553,15 +1738,22 @@ def home():
                             </div>
                         </div>
                         <p class="mt-4 text-xs font-bold" :class="studentDashData.overall_pct >= 75 ? 'text-emerald-400' : 'text-red-400'">
-                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Zone' : '⚠️ Shortage Zone'"></span>
+                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Zone' : '⚠️ Shortage / Defaulter Zone'"></span>
                         </p>
                     </div>
+                </div>
+
+                <!-- Quick Apply Leave Banner -->
+                <div class="bg-gradient-to-br from-indigo-950 to-slate-900 border border-indigo-500/40 p-5 rounded-3xl shadow-xl text-center">
+                    <h4 class="font-black text-indigo-300 text-sm mb-1">Need Leave or Absence Permission?</h4>
+                    <p class="text-xs text-slate-400 mb-4">Draft and email official leave directly to your teacher's ERP portal.</p>
+                    <button @click="showLeaveModal = true" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-2.5 rounded-xl text-xs shadow transition">✉️ COMPOSE LEAVE EMAIL</button>
                 </div>
             </div>
 
             <!-- Right Details Area -->
             <div class="col-span-1 md:col-span-2 space-y-8">
-                
+
                 <!-- Subject Wise Compile Report -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-amber-400 mb-6 flex items-center gap-2">📊 Subject-wise Compilation Report</h3>
@@ -1578,6 +1770,36 @@ def home():
                                 <p class="text-xs font-bold text-slate-400">Classes: <span class="text-white" x-text="sub.present + ' / ' + sub.total"></span></p>
                             </div>
                         </template>
+                    </div>
+                </div>
+
+                <!-- Leave Status & History Tab -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-xl font-black text-teal-400 flex items-center gap-2">📬 My Submitted Leave Applications</h3>
+                        <button @click="showLeaveModal = true" class="text-xs bg-emerald-600 text-white font-bold py-1 px-3 rounded-lg shadow">+ New Application</button>
+                    </div>
+                    <div class="space-y-3 max-h-60 overflow-y-auto custom-scrollbar pr-2">
+                        <template x-for="l in (studentDashData.leaves || [])" :key="l.id">
+                            <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-800 text-xs">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <span class="font-black text-sky-300 text-sm" x-text="l.leave_type"></span>
+                                        <span class="text-slate-400 ml-2" x-text="'(' + l.from_date + ' to ' + l.to_date + ')'"></span>
+                                    </div>
+                                    <span class="font-black px-2.5 py-1 rounded-full text-[10px] uppercase"
+                                          :class="l.status === 'Approved' ? 'bg-emerald-900 text-emerald-300 border border-emerald-500' : (l.status === 'Rejected' ? 'bg-red-900 text-red-300 border border-red-500' : 'bg-amber-900 text-amber-300 border border-amber-500')"
+                                          x-text="l.status"></span>
+                                </div>
+                                <p class="text-slate-300 mt-2 font-medium" x-text="l.reason"></p>
+                                <div x-show="l.faculty_remark" class="mt-2 bg-slate-950 p-2.5 rounded-xl border border-amber-500/30 text-amber-300">
+                                    <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="!studentDashData.leaves || studentDashData.leaves.length === 0" class="text-center p-6 text-slate-500 text-xs font-bold">
+                            No leave applications filed yet. Click "Apply Leave / Email" above to submit one.
+                        </div>
                     </div>
                 </div>
 
@@ -1618,12 +1840,139 @@ def home():
     </div>
 
 
+    <!-- ============================================================== -->
+    <!-- MODAL 1: DEFAULTERS LIST MODAL (ONE-CLICK POPUP)               -->
+    <!-- ============================================================== -->
+    <div x-show="showDefaultersModal" class="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50" style="display: none;">
+        <div class="bg-slate-900 border-2 border-red-500 w-full max-w-4xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[90vh] flex flex-col">
+            <div class="flex justify-between items-center pb-4 border-b border-slate-700">
+                <div class="flex items-center gap-3">
+                    <span class="text-3xl">🚨</span>
+                    <div>
+                        <h3 class="text-2xl font-black text-white">Student Defaulters List (< 75%)</h3>
+                        <p class="text-red-400 text-xs font-bold" x-text="'Subject: ' + selectedSubject + ' | ' + selectedMonth + ' ' + selectedYear"></p>
+                    </div>
+                </div>
+                <button @click="showDefaultersModal = false" class="text-slate-400 hover:text-white font-black text-2xl px-2">✕</button>
+            </div>
+
+            <div class="my-4 flex items-center justify-between gap-4">
+                <p class="text-xs text-slate-300">Total Defaulters Found: <b class="text-red-400 text-sm" x-text="defaultersList.length"></b></p>
+                <button @click="copyDefaultersToClipboard" class="bg-slate-800 hover:bg-slate-700 text-sky-400 text-xs font-bold py-1.5 px-3 rounded-lg border border-sky-400/40">📋 Copy List to Clipboard</button>
+            </div>
+
+            <div class="overflow-y-auto custom-scrollbar flex-1 rounded-2xl border border-slate-700">
+                <table class="w-full text-sm text-center">
+                    <thead class="bg-red-950 text-red-200 font-bold sticky top-0">
+                        <tr>
+                            <th class="p-3">Roll No</th>
+                            <th class="p-3">Reg No</th>
+                            <th class="p-3 text-left">Student Name</th>
+                            <th class="p-3">Classes Attended</th>
+                            <th class="p-3">Attendance %</th>
+                            <th class="p-3">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800 font-medium">
+                        <template x-for="def in defaultersList" :key="def.reg_no">
+                            <tr class="hover:bg-slate-800/60 bg-slate-900/60">
+                                <td class="p-3 text-yellow-300 font-bold" x-text="def.roll_no"></td>
+                                <td class="p-3 text-sky-300 font-bold" x-text="def.reg_no"></td>
+                                <td class="p-3 text-left font-bold text-white" x-text="def.name"></td>
+                                <td class="p-3 text-slate-300" x-text="def.present + ' / ' + def.total"></td>
+                                <td class="p-3 font-black text-red-400 text-base" x-text="def.pct + '%'"></td>
+                                <td class="p-3"><span class="bg-red-950 border border-red-500 text-red-400 text-[10px] font-black px-2.5 py-1 rounded-full">CRITICAL</span></td>
+                            </tr>
+                        </template>
+                        <tr x-show="defaultersList.length === 0">
+                            <td colspan="6" class="p-8 text-center text-emerald-400 font-bold text-base">🎉 Excellent! No defaulters below 75% for this subject and month.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-6 flex justify-end">
+                <button @click="showDefaultersModal = false" class="bg-slate-700 hover:bg-slate-600 text-white font-black px-6 py-2.5 rounded-xl text-sm shadow">Close Window</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ============================================================== -->
+    <!-- MODAL 2: STUDENT EMAIL / LEAVE COMPOSER MODAL                  -->
+    <!-- ============================================================== -->
+    <div x-show="showLeaveModal" class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50" style="display: none;">
+        <div class="bg-slate-900 border-2 border-emerald-500 w-full max-w-2xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[95vh] overflow-y-auto custom-scrollbar">
+            
+            <!-- Email Window Header -->
+            <div class="flex justify-between items-center pb-4 border-b border-slate-700 mb-6">
+                <div class="flex items-center gap-3">
+                    <span class="text-3xl">📧</span>
+                    <div>
+                        <h3 class="text-xl font-black text-white">Official Leave Application Desk</h3>
+                        <p class="text-emerald-400 text-xs font-bold">Compose & send email directly to Faculty Attendance Portal</p>
+                    </div>
+                </div>
+                <button @click="showLeaveModal = false" class="text-slate-400 hover:text-white font-black text-2xl px-2">✕</button>
+            </div>
+
+            <form @submit.prevent="submitLeaveApplication" class="space-y-4">
+                <!-- To Header -->
+                <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs flex items-center gap-3">
+                    <span class="font-bold text-sky-400">TO (Faculty In-Charge):</span>
+                    <span class="font-black text-white" x-text="studentDashData?.faculty_id || 'Class Faculty'"></span>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sky-300 font-bold text-xs mb-1">Leave Category / Type</label>
+                        <select x-model="leaveForm.leave_type" required class="w-full p-2.5 rounded-xl text-xs">
+                            <option value="Medical / Sick Leave">🏥 Medical / Sick Leave</option>
+                            <option value="Event / College Fest Leave">🏆 Event / College Fest Leave</option>
+                            <option value="Urgent Personal Leave">🏠 Urgent Personal Work</option>
+                            <option value="Exam / External Training">📑 Exam / External Training</option>
+                            <option value="Other Official Reason">📝 Other Official Reason</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sky-300 font-bold text-xs mb-1">Subject / Class</label>
+                        <input type="text" x-model="leaveForm.subject_name" placeholder="e.g. All Subjects / BE / SAD" required class="w-full p-2.5 rounded-xl text-xs">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sky-300 font-bold text-xs mb-1">From Date</label>
+                        <input type="date" x-model="leaveForm.from_date" required class="w-full p-2.5 rounded-xl text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-sky-300 font-bold text-xs mb-1">To Date</label>
+                        <input type="date" x-model="leaveForm.to_date" required class="w-full p-2.5 rounded-xl text-xs">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sky-300 font-bold text-xs mb-1">Application Body / Reason Description</label>
+                    <textarea x-model="leaveForm.reason" rows="5" placeholder="Respected Sir/Ma'am, I am writing this to kindly request leave on the aforementioned dates due to..." required class="w-full p-3 rounded-xl text-xs font-normal leading-relaxed"></textarea>
+                </div>
+
+                <div class="pt-2 flex gap-4">
+                    <button type="button" @click="showLeaveModal = false" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-3 rounded-xl text-xs">Cancel</button>
+                    <button type="submit" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-xs shadow-lg flex items-center justify-center gap-2">
+                        <span>📤 SEND APPLICATION TO FACULTY</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+
     <script>
         function erpApp() {
             let now = new Date();
             let mList = ['January','February','March','April','May','June','July','August','September','October','November','December'];
             let yList = ['2025', '2026', '2027'];
-            
+
             let curMonth = mList[now.getMonth()];
             let curYear = String(now.getFullYear());
             let curDate = now.toISOString().split('T')[0];
@@ -1639,7 +1988,7 @@ def home():
                 authError: '',
                 userId: '',
                 currentTab: 'dashboard',
-                
+
                 // ORIGINAL STATES
                 months: mList,
                 years: yList,
@@ -1648,16 +1997,20 @@ def home():
                 courseName: 'BCA',
                 sectionName: 'Semester 1',
                 collegeLogo: 'https://i.ibb.co/3s68K1v/tree-logo.png',
-                
+
                 totalStudents: 0,
                 classesConducted: 0,
                 presentToday: 0,
+                defaultersCount: 0,
+                defaultersList: [],
+                showDefaultersModal: false,
+
                 subjects: [],
                 selectedSubject: '',
                 selectedMonth: curMonth,
                 selectedYear: curYear,
                 selectedDate: curDate,
-                
+
                 students: [],
                 currentIndex: 0,
                 currentStudentDetails: {},
@@ -1669,7 +2022,7 @@ def home():
                 delSubject: '',
                 profileReg: '',
                 profileForm: { email: '', contact: '', parent_name: '', parent_contact: '', res_type: '🏠 HOSTELER (Hostel Resident)' },
-                
+
                 tableMonth: curMonth,
                 tableYear: curYear,
                 tableSubject: '',
@@ -1681,20 +2034,31 @@ def home():
                 reportYear: curYear,
                 reportSubjects: [],
                 reportRows: [],
-                
+
                 resetScope: 'single',
                 resetReg: '',
                 resetSubject: 'All Subjects',
                 resetDate: curDate,
-                
+
                 importSubject: '',
                 importDate: curDate,
 
-                // NEW STATES
                 studentDashData: null,
                 tableSearchQuery: '',
                 reportSearchQuery: '',
                 skippedImports: [],
+
+                // LEAVE SYSTEM STATES
+                showLeaveModal: false,
+                leaveForm: {
+                    leave_type: 'Medical / Sick Leave',
+                    subject_name: 'All Subjects',
+                    from_date: curDate,
+                    to_date: curDate,
+                    reason: ''
+                },
+                facultyLeaves: [],
+                pendingLeavesCount: 0,
 
                 init() {
                     this.syncFromDate();
@@ -1738,6 +2102,7 @@ def home():
                             this.loggedIn = true;
                             this.authError = '';
                             this.loadData();
+                            this.loadFacultyLeaves();
                         } else {
                             this.authError = data.detail || "Authentication Failed. Please try again.";
                         }
@@ -1782,6 +2147,65 @@ def home():
                     }
                 },
 
+                async submitLeaveApplication() {
+                    if (!this.studentDashData) return;
+                    let formData = new FormData();
+                    formData.append('faculty_id', this.studentDashData.faculty_id);
+                    formData.append('reg_no', this.studentDashData.student.reg_no);
+                    formData.append('student_name', this.studentDashData.student.name);
+                    formData.append('leave_type', this.leaveForm.leave_type);
+                    formData.append('subject_name', this.leaveForm.subject_name);
+                    formData.append('from_date', this.leaveForm.from_date);
+                    formData.append('to_date', this.leaveForm.to_date);
+                    formData.append('reason', this.leaveForm.reason);
+
+                    try {
+                        let res = await fetch('/api/apply_leave', { method: 'POST', body: formData });
+                        let data = await res.json();
+                        if (res.ok) {
+                            alert(data.message);
+                            this.showLeaveModal = false;
+                            this.leaveForm.reason = '';
+                            this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
+                        } else {
+                            alert("Failed to submit: " + (data.detail || 'Error'));
+                        }
+                    } catch(e) {
+                        alert("Network error submitting application.");
+                    }
+                },
+
+                async loadFacultyLeaves() {
+                    try {
+                        let res = await fetch(`/api/get_leaves/${this.userId}`);
+                        let data = await res.json();
+                        this.facultyLeaves = (data.leaves || []).map(l => ({ ...l, tempRemark: l.faculty_remark || '' }));
+                        this.pendingLeavesCount = this.facultyLeaves.filter(l => l.status === 'Pending').length;
+                    } catch(e) {
+                        console.error("Error loading leaves: ", e);
+                    }
+                },
+
+                async updateLeaveStatus(leaveId, status, remark) {
+                    let formData = new FormData();
+                    formData.append('user_id', this.userId);
+                    formData.append('leave_id', leaveId);
+                    formData.append('status', status);
+                    formData.append('remark', remark || '');
+
+                    try {
+                        let res = await fetch('/api/update_leave_status', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            this.loadFacultyLeaves();
+                        } else {
+                            let err = await res.json();
+                            alert("Error: " + err.detail);
+                        }
+                    } catch(e) {
+                        alert("Error updating leave.");
+                    }
+                },
+
                 async loadData() {
                     try {
                         let res = await fetch(`/api/data/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}&target_date=${this.selectedDate}`);
@@ -1794,6 +2218,8 @@ def home():
                         this.totalStudents = data.total_students;
                         this.classesConducted = data.classes_conducted;
                         this.presentToday = data.present_today;
+                        this.defaultersCount = data.defaulters_count || 0;
+                        this.defaultersList = data.defaulters || [];
                         this.subjects = data.subjects;
                         if (!this.selectedSubject && this.subjects.length > 0) this.selectedSubject = this.subjects[0];
                         if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
@@ -1803,6 +2229,20 @@ def home():
                     } catch(e) {
                         console.error("Dashboard Load Error: ", e);
                     }
+                },
+
+                copyDefaultersToClipboard() {
+                    if (this.defaultersList.length === 0) {
+                        alert("No defaulters to copy.");
+                        return;
+                    }
+                    let text = `ISM PATNA - DEFAULTERS LIST (< 75%)\nSubject: ${this.selectedSubject} | Month: ${this.selectedMonth} ${this.selectedYear}\n\n`;
+                    this.defaultersList.forEach((d, i) => {
+                        text += `${i+1}. Roll: ${d.roll_no} | Reg: ${d.reg_no} | ${d.name} -> ${d.present}/${d.total} (${d.pct}%)\n`;
+                    });
+                    navigator.clipboard.writeText(text).then(() => {
+                        alert("Defaulters List copied to clipboard!");
+                    });
                 },
 
                 async loadTableData() {
@@ -1818,7 +2258,7 @@ def home():
                     let current = student.days[day];
                     let nextStatus = '';
                     let displayVal = '';
-                    
+
                     if (current === 'P') {
                         nextStatus = 'Absent';
                         displayVal = 'A';
@@ -1830,10 +2270,8 @@ def home():
                         displayVal = 'P';
                     }
 
-                    // 1. Update the clicked cell visually
                     student.days[day] = displayVal;
-                    
-                    // 2. Re-calculate Total Classes for the whole month (count distinct days with at least one P or A)
+
                     let distinctDays = new Set();
                     for (let s of this.tableRows) {
                         for (let d = 1; d <= this.tableNumDays; d++) {
@@ -1844,7 +2282,6 @@ def home():
                     }
                     this.tableTotalClasses = distinctDays.size;
 
-                    // 3. Re-calculate the % out of 100 for ALL students based on the newly updated total classes
                     for (let s of this.tableRows) {
                         let pCount = 0;
                         for (let d = 1; d <= this.tableNumDays; d++) {
@@ -1927,7 +2364,7 @@ def home():
                     formData.append('subject', this.selectedSubject);
                     formData.append('date_str', this.selectedDate);
                     formData.append('status', status);
-                    
+
                     let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
                     if (res.ok) {
                         if (this.currentIndex < this.students.length - 1) {
@@ -1999,11 +2436,11 @@ def home():
 
                 async deleteAllStudents() {
                     if (!confirm("WARNING: Are you entirely sure you want to delete ALL students and their attendance data? This action cannot be undone.")) return;
-                    
+
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
-                    
+
                     if (res.ok) {
                         let data = await res.json();
                         alert(data.message);
@@ -2018,7 +2455,7 @@ def home():
                     this.skippedImports = [];
                     let fileInput = document.getElementById('studentOnlyFile');
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
-                    
+
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
@@ -2042,7 +2479,7 @@ def home():
                     if (fileInput.files.length === 0) { alert('Please select a CSV or Excel file.'); return; }
                     if (!this.importSubject) { alert('Please select a subject.'); return; }
                     if (!this.importDate) { alert('Please select a date.'); return; }
-                    
+
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
@@ -2156,7 +2593,7 @@ def home():
                     formData.append('parent_name', this.profileForm.parent_name);
                     formData.append('parent_contact', this.profileForm.parent_contact);
                     formData.append('res_type', this.profileForm.res_type);
-                    
+
                     let photoInput = document.getElementById('studentPhotoFile');
                     if (photoInput.files.length > 0) {
                         formData.append('file', photoInput.files[0]);
@@ -2176,12 +2613,12 @@ def home():
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
-                    
+
                     try {
                         let response = await fetch(pdfUrl);
                         let blob = await response.blob();
                         let file = new File([blob], fileName, {type: "application/pdf"});
-                        
+
                         if (navigator.canShare && navigator.canShare({ files: [file] })) {
                             await navigator.share({ files: [file] });
                             return; 
@@ -2205,6 +2642,8 @@ def home():
                     this.userId = '';
                     this.studentDashData = null;
                     this.skippedImports = []; 
+                    this.showDefaultersModal = false;
+                    this.showLeaveModal = false;
                 }
             }
         }

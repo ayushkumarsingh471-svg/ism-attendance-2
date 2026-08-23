@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
+app = FastAPI(title="ISM Attendance ERP - High Performance Full Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -82,13 +82,19 @@ def init_tenant_db(user_id):
             from_date TEXT,
             to_date TEXT,
             reason TEXT,
+            doc_data TEXT,
+            doc_name TEXT,
             status TEXT DEFAULT 'Pending',
             faculty_remark TEXT DEFAULT '',
             created_at TEXT
         )'''))
+
         try:
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS doc_data TEXT'))
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS doc_name TEXT'))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_perf ON {t_attendance} (subject_id, date, status, student_id)'))
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
-        except:
+        except Exception:
             pass
 
         res = conn.execute(text(f"SELECT COUNT(*) FROM {t_subjects}")).fetchone()[0]
@@ -161,7 +167,9 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
         sub_map = {r[1]: r[0] for r in sub_rows}
 
-        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid"), {"sid": sid}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        tot_c_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} GROUP BY subject_id")).fetchall()
+        sub_total_classes = {r[0]: r[1] for r in tot_c_rows}
+
         att_rows = conn.execute(text(f"SELECT subject_id, COUNT(*) FROM {t_attendance} WHERE student_id=:sid AND status='Present' GROUP BY subject_id"), {"sid": st_id}).fetchall()
         present_map = {r[0]: r[1] for r in att_rows}
 
@@ -169,7 +177,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         tot_p_all = 0
         tot_c_all = 0
         for sub, sid in sub_map.items():
-            tot_c = sub_total_classes.get(sub, 0)
+            tot_c = sub_total_classes.get(sid, 0)
             tot_p = present_map.get(sid, 0)
             tot_p_all += tot_p
             tot_c_all += tot_c
@@ -190,12 +198,13 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         try:
             leave_records = conn.execute(text(f"""
-                SELECT id, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at 
+                SELECT id, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at, doc_data, doc_name 
                 FROM {t_leaves} WHERE reg_no = :r ORDER BY id DESC
             """), {"r": reg_no}).fetchall()
             leaves = [{
                 "id": lr[0], "leave_type": lr[1], "subject": lr[2], "from_date": lr[3], 
-                "to_date": lr[4], "reason": lr[5], "status": lr[6], "faculty_remark": lr[7] or '', "created_at": lr[8]
+                "to_date": lr[4], "reason": lr[5], "status": lr[6], "faculty_remark": lr[7] or '', 
+                "created_at": lr[8], "doc_data": lr[9] or '', "doc_name": lr[10] or ''
             } for lr in leave_records]
         except Exception:
             leaves = []
@@ -217,11 +226,11 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         }
 
 # ==========================================
-# LEAVE MANAGEMENT APIS
+# LEAVE MANAGEMENT APIS (WITH PDF ATTACHMENT)
 # ==========================================
 
 @app.post("/api/apply_leave")
-def apply_leave(
+async def apply_leave(
     faculty_id: str = Form(...),
     reg_no: str = Form(...),
     student_name: str = Form(...),
@@ -229,22 +238,33 @@ def apply_leave(
     subject_name: str = Form(...),
     from_date: str = Form(...),
     to_date: str = Form(...),
-    reason: str = Form(...)
+    reason: str = Form(...),
+    doc_file: UploadFile = File(None)
 ):
     try:
         safe_uid = get_safe_prefix(faculty_id)
         t_leaves = f"{safe_uid}_leaves"
         c_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        doc_data = None
+        doc_name = None
+        if doc_file and doc_file.filename:
+            doc_name = doc_file.filename
+            contents = await doc_file.read()
+            ext = doc_name.split('.')[-1].lower()
+            mime = "application/pdf" if ext == "pdf" else f"image/{ext}"
+            doc_data = f"data:{mime};base64,{base64.b64encode(contents).decode('utf-8')}"
+
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, created_at)
-                VALUES (:r, :n, :lt, :sub, :fd, :td, :re, 'Pending', :ca)
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, doc_data, doc_name, status, created_at)
+                VALUES (:r, :n, :lt, :sub, :fd, :td, :re, :dd, :dn, 'Pending', :ca)
             """), {
                 "r": reg_no.strip(), "n": student_name.strip(), "lt": leave_type.strip(),
                 "sub": subject_name.strip(), "fd": from_date.strip(), "td": to_date.strip(),
-                "re": reason.strip(), "ca": c_time
+                "re": reason.strip(), "dd": doc_data, "dn": doc_name, "ca": c_time
             })
-        return {"success": True, "message": "Leave application sent successfully to your Faculty portal!"}
+        return {"success": True, "message": "Leave application & document sent successfully to your Faculty portal!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -264,17 +284,20 @@ def get_leaves(user_id: str):
                     from_date TEXT,
                     to_date TEXT,
                     reason TEXT,
+                    doc_data TEXT,
+                    doc_name TEXT,
                     status TEXT DEFAULT 'Pending',
                     faculty_remark TEXT DEFAULT '',
                     created_at TEXT
                 )
             """))
-            rows = conn.execute(text(f"SELECT id, reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at FROM {t_leaves} ORDER BY id DESC")).fetchall()
+            rows = conn.execute(text(f"SELECT id, reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at, doc_data, doc_name FROM {t_leaves} ORDER BY id DESC")).fetchall()
         
         leaves_list = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3],
             "subject_name": r[4], "from_date": r[5], "to_date": r[6], "reason": r[7],
-            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10]
+            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10],
+            "doc_data": r[11] or '', "doc_name": r[12] or ''
         } for r in rows]
         return {"leaves": leaves_list}
     except Exception as e:
@@ -294,7 +317,7 @@ def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), sta
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
-# FACULTY CORE API
+# HIGH-SPEED FACULTY CORE API
 # ==========================================
 
 @app.get("/api/data/{user_id}")
@@ -318,26 +341,30 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
 
         tc_count = 0
         present_today = 0
+        p_counts_map = {}
+
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
             present_today = conn.execute(text(f"SELECT COUNT(date) FROM {t_attendance} WHERE subject_id=:sid AND date=:dt AND status='Present'"), {"sid": sub_id, "dt": target_date}).fetchone()[0] or 0
+            
+            p_rows = conn.execute(text(f"""
+                SELECT student_id, COUNT(*) FROM {t_attendance} 
+                WHERE subject_id=:sid AND date LIKE :d AND status='Present' 
+                GROUP BY student_id
+            """), {"sid": sub_id, "d": date_pattern}).fetchall()
+            p_counts_map = {r[0]: r[1] for r in p_rows}
 
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
         st_list = [{"id": s[0], "reg_no": s[1], "roll_no": s[2], "name": s[3]} for s in students]
 
-        # Defaulters evaluation
         defaulters = []
-        if tc_count > 0 and sub_id:
-            for s in students:
-                s_id, reg, roll, name = s
-                p_cnt = conn.execute(text(f"SELECT COUNT(*) FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid AND date LIKE :d AND status='Present'"), {"sid": s_id, "subid": sub_id, "d": date_pattern}).fetchone()[0] or 0
-                pct = round((p_cnt / tc_count) * 100)
-                if pct < 75:
-                    defaulters.append({"reg_no": reg, "roll_no": roll, "name": name, "present": p_cnt, "total": tc_count, "pct": pct})
-        elif tc_count == 0 and len(students) > 0:
-            for s in students:
-                defaulters.append({"reg_no": s[1], "roll_no": s[2], "name": s[3], "present": 0, "total": 0, "pct": 0})
+        for s in students:
+            s_id, reg, roll, name = s
+            p_cnt = p_counts_map.get(s_id, 0)
+            pct = round((p_cnt / tc_count) * 100) if tc_count > 0 else 0
+            if pct < 75:
+                defaulters.append({"reg_no": reg, "roll_no": roll, "name": name, "present": p_cnt, "total": tc_count, "pct": pct})
 
         def get_cfg(k, def_v):
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
@@ -486,10 +513,8 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
-        sub_total_classes = {}
-        for sub, sub_id in sub_map.items():
-            cnt = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
-            sub_total_classes[sub] = cnt
+        tc_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} WHERE date LIKE :d GROUP BY subject_id"), {"d": date_pattern}).fetchall()
+        sub_total_classes = {r[0]: r[1] for r in tc_rows}
 
         att_rows = conn.execute(text(f"""
             SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} 
@@ -506,7 +531,7 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
             tot_p_all = 0
             tot_c_all = 0
             for sub, sub_id in sub_map.items():
-                tot_c = sub_total_classes.get(sub, 0)
+                tot_c = sub_total_classes.get(sub_id, 0)
                 tot_p = present_map.get((st_id, sub_id), 0)
                 tot_p_all += tot_p
                 tot_c_all += tot_c
@@ -534,7 +559,9 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
         sub_map = {s[1]: s[0] for s in sub_rows}
 
-        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sid, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        tc_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} WHERE date LIKE :d GROUP BY subject_id"), {"d": date_pattern}).fetchall()
+        sub_total_classes = {r[0]: r[1] for r in tc_rows}
+
         att_rows = conn.execute(text(f"SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} WHERE status='Present' AND date LIKE :d GROUP BY student_id, subject_id"), {"d": date_pattern}).fetchall()
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
@@ -544,7 +571,7 @@ def download_excel(user_id: str, month: str = "July", year: int = 2026):
             row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
-                tot_c = sub_total_classes.get(sub, 0)
+                tot_c = sub_total_classes.get(sub_id, 0)
                 tot_p = present_map.get((st_id, sub_id), 0)
                 tot_p_all += tot_p
                 tot_c_all += tot_c
@@ -587,7 +614,9 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
-        sub_total_classes = {sub: conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sid, "d": date_pattern}).fetchone()[0] or 0 for sub, sid in sub_map.items()}
+        tc_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} WHERE date LIKE :d GROUP BY subject_id"), {"d": date_pattern}).fetchall()
+        sub_total_classes = {r[0]: r[1] for r in tc_rows}
+
         att_rows = conn.execute(text(f"SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} WHERE status='Present' AND date LIKE :d GROUP BY student_id, subject_id"), {"d": date_pattern}).fetchall()
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
@@ -602,7 +631,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
             row = [str(roll), str(reg), str(name)]
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
-                tot_c = sub_total_classes.get(sub, 0)
+                tot_c = sub_total_classes.get(sub_id, 0)
                 tot_p = present_map.get((st_id, sub_id), 0)
                 tot_p_all += tot_p
                 tot_c_all += tot_c
@@ -715,7 +744,7 @@ def delete_all_students(user_id: str = Form(...)):
             conn.execute(text(f"DELETE FROM {safe_uid}_students"))
             try:
                 conn.execute(text(f"DELETE FROM {safe_uid}_leaves"))
-            except:
+            except Exception:
                 pass
         return {"success": True, "message": "All students and their records deleted successfully!"}
     except Exception as e:
@@ -1084,35 +1113,31 @@ def home():
     <!-- MAIN LOGIN SCREEN -->
     <div x-show="!loggedIn" class="flex items-center justify-center min-h-screen p-6 relative z-10">
         <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
-
-            <!-- Left Branding Side -->
             <div>
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
-                <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
+                <p class="text-slate-300 text-sm leading-relaxed mb-6">High-speed real-time portal for instantaneous attendance calculation, defaulters tracking, and student leave management with document attachments.</p>
 
                 <div class="space-y-4">
                     <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">👨‍🏫</div>
                         <div>
                             <p class="text-sky-300 font-bold text-sm">Faculty Login</p>
-                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance, review leaves & track defaulters.</p>
+                            <p class="text-slate-400 text-xs">Manage students, mark attendance, review leaves & track defaulters.</p>
                         </div>
                     </div>
                     <div class="bg-emerald-950/60 border border-emerald-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">View percentage, daily log, and apply for leaves with official faculty inbox integration.</p>
+                            <p class="text-slate-400 text-xs">View percentage, daily log, and apply for leaves with PDF / document attachments.</p>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Right Login Form Side -->
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
-                <!-- Role Selector Tabs -->
                 <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
                     <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
                     <button @click="authRole = 'student'" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
@@ -1160,7 +1185,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- FACULTY DASHBOARD -->
+    <!-- FACULTY DASHBOARD                                              -->
     <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
@@ -1177,15 +1202,18 @@ def home():
                 <p class="text-slate-400 text-xs font-bold mb-2">Navigate Pages:</p>
                 <nav class="space-y-2 text-sm font-black">
                     <button @click="currentTab = 'dashboard'; loadData()" :class="currentTab === 'dashboard' ? 'bg-blue-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-blue-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📊 Dashboard</button>
-                    <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-950/90'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center justify-between">
-                        <span class="flex items-center gap-2">📬 Leave Requests</span>
-                        <span x-show="pendingLeavesCount > 0" class="bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full text-xs font-black" x-text="pendingLeavesCount"></span>
-                    </button>
                     <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
                     <button @click="currentTab = 'table'; syncToLive(); loadTableData()" :class="currentTab === 'table' ? 'bg-purple-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-purple-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📅 Attendance Table</button>
                     <button @click="currentTab = 'report'; syncToLive(); loadReportData()" :class="currentTab === 'report' ? 'bg-amber-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-amber-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">📑 Monthly Compile Report</button>
                     <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
                     <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
+
+                    <!-- LEAVE REQUESTS POSITIONED DIRECTLY UNDER MANAGE STUDENTS & ABOVE COLLEGE PROFILE -->
+                    <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-950/90'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center justify-between">
+                        <span class="flex items-center gap-2">📬 Leave Requests</span>
+                        <span x-show="pendingLeavesCount > 0" class="bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full text-xs font-black" x-text="pendingLeavesCount"></span>
+                    </button>
+
                     <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
                 </nav>
             </div>
@@ -1202,7 +1230,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 1: DASHBOARD (WITH DEFAULTERS CARD DIRECTLY UNDER STATS) -->
+            <!-- TAB 1: DASHBOARD -->
             <div x-show="currentTab === 'dashboard'">
                 <h2 class="text-xl font-black text-white mb-4 flex items-center gap-2">📊 Monthly Overview & Daily Status</h2>
                 <div class="grid grid-cols-4 gap-4 mb-6">
@@ -1236,7 +1264,6 @@ def home():
                     </div>
                 </div>
 
-                <!-- 4 PRIMARY METRIC CARDS -->
                 <div class="grid grid-cols-4 gap-6">
                     <div class="bg-white text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-blue-500">
                         <p class="font-bold text-slate-600">Total Students</p>
@@ -1256,75 +1283,20 @@ def home():
                     </div>
                 </div>
 
-                <!-- --- NEW FEATURE: DEFAULTERS LIST BANNER RIGHT BELOW TOTAL STUDENTS/CLASSES/SUBJECT --- -->
+                <!-- DEFAULTERS LIST BANNER -->
                 <div class="mt-6 bg-gradient-to-r from-red-950 via-slate-900 to-red-950 p-6 rounded-3xl border-2 border-red-500 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-6">
                     <div class="flex items-center gap-4">
                         <div class="text-5xl animate-pulse">🚨</div>
                         <div>
                             <div class="inline-block bg-red-600 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full mb-1 tracking-wider uppercase">Attendance Alert</div>
                             <h3 class="text-xl font-black text-white">Defaulters List (< 75% Attendance)</h3>
-                            <p class="text-slate-300 text-xs mt-0.5">Found <b class="text-red-400 font-black text-sm" x-text="defaultersCount"></b> student(s) below required criteria for <b class="text-yellow-300" x-text="selectedSubject"></b> in <b class="text-sky-300" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
+                            <p class="text-slate-300 text-xs mt-0.5">Found <b class="text-red-400 font-black text-sm" x-text="defaultersCount"></b> student(s) below criteria for <b class="text-yellow-300" x-text="selectedSubject"></b> in <b class="text-sky-300" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
                         </div>
                     </div>
                     <button @click="showDefaultersModal = true" class="bg-red-600 hover:bg-red-700 text-white font-black px-6 py-3.5 rounded-2xl shadow-xl transition transform active:scale-95 flex items-center gap-2 text-sm">
                         <span>📋 VIEW DEFAULTERS LIST</span>
                         <span class="bg-white text-red-700 px-2 py-0.5 rounded-full text-xs font-black" x-text="defaultersCount"></span>
                     </button>
-                </div>
-
-            </div>
-
-            <!-- --- TAB: LEAVE REQUESTS (FACULTY INBOX) --- -->
-            <div x-show="currentTab === 'leaves'">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-2xl font-black text-white flex items-center gap-2">📬 Student Leave Applications & Inquiries</h2>
-                    <button @click="loadFacultyLeaves" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow">🔄 Refresh Inbox</button>
-                </div>
-
-                <div class="space-y-4">
-                    <template x-for="lv in facultyLeaves" :key="lv.id">
-                        <div class="glass-card p-6 rounded-3xl border-2" :class="lv.status === 'Approved' ? 'border-emerald-500/60' : (lv.status === 'Rejected' ? 'border-red-500/60' : 'border-amber-500')">
-                            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-slate-700">
-                                <div class="flex items-center gap-3">
-                                    <div class="text-3xl">✉️</div>
-                                    <div>
-                                        <div class="flex items-center gap-2">
-                                            <h3 class="text-lg font-black text-white" x-text="lv.student_name"></h3>
-                                            <span class="bg-sky-900 text-sky-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="'Reg: ' + lv.reg_no"></span>
-                                            <span class="bg-purple-900 text-purple-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="lv.leave_type"></span>
-                                        </div>
-                                        <p class="text-slate-400 text-xs mt-1" x-text="'Subject: ' + lv.subject_name + ' | Dates: ' + lv.from_date + ' to ' + lv.to_date + ' | Sent: ' + lv.created_at"></p>
-                                    </div>
-                                </div>
-                                <div>
-                                    <span class="px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider"
-                                          :class="lv.status === 'Approved' ? 'bg-emerald-600 text-white' : (lv.status === 'Rejected' ? 'bg-red-600 text-white' : 'bg-amber-500 text-slate-950')"
-                                          x-text="lv.status"></span>
-                                </div>
-                            </div>
-
-                            <!-- Reason Body -->
-                            <div class="py-4 text-sm text-slate-200 bg-slate-950/60 p-4 rounded-2xl my-3 border border-slate-800">
-                                <p class="text-xs font-bold text-sky-400 mb-1">Student Application Content / Reason:</p>
-                                <p class="whitespace-pre-line leading-relaxed font-sans" x-text="lv.reason"></p>
-                            </div>
-
-                            <!-- Faculty Reply & Actions -->
-                            <div class="pt-2 flex flex-col md:flex-row gap-4 items-center justify-between">
-                                <div class="w-full md:w-2/3">
-                                    <input type="text" x-model="lv.tempRemark" placeholder="Type message/remark for student (e.g., 'Approved for 2 days. Submit doctor note.')..." class="w-full p-2.5 rounded-xl text-xs">
-                                    <p x-show="lv.faculty_remark" class="text-[11px] text-amber-300 font-semibold mt-1" x-text="'Current Saved Note: ' + lv.faculty_remark"></p>
-                                </div>
-                                <div class="flex gap-2 w-full md:w-auto">
-                                    <button @click="updateLeaveStatus(lv.id, 'Approved', lv.tempRemark)" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">✅ APPROVE</button>
-                                    <button @click="updateLeaveStatus(lv.id, 'Rejected', lv.tempRemark)" class="flex-1 md:flex-none bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">❌ REJECT</button>
-                                </div>
-                            </div>
-                        </div>
-                    </template>
-                    <div x-show="facultyLeaves.length === 0" class="text-center p-12 glass-card rounded-3xl text-slate-400 font-bold">
-                        📭 No leave applications submitted yet by students.
-                    </div>
                 </div>
             </div>
 
@@ -1405,7 +1377,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE (WITH INLINE EDITOR & SEARCH) -->
+            <!-- TAB 3: ATTENDANCE TABLE -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
 
@@ -1638,6 +1610,66 @@ def home():
                 </div>
             </div>
 
+            <!-- TAB: LEAVE REQUESTS (FACULTY INBOX WITH DOCUMENT DOWNLOAD) -->
+            <div x-show="currentTab === 'leaves'">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-black text-white flex items-center gap-2">📬 Student Leave Applications & Inquiries</h2>
+                    <button @click="loadFacultyLeaves" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow">🔄 Refresh Inbox</button>
+                </div>
+
+                <div class="space-y-4">
+                    <template x-for="lv in facultyLeaves" :key="lv.id">
+                        <div class="glass-card p-6 rounded-3xl border-2" :class="lv.status === 'Approved' ? 'border-emerald-500/60' : (lv.status === 'Rejected' ? 'border-red-500/60' : 'border-amber-500')">
+                            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-slate-700">
+                                <div class="flex items-center gap-3">
+                                    <div class="text-3xl">✉️</div>
+                                    <div>
+                                        <div class="flex items-center gap-2">
+                                            <h3 class="text-lg font-black text-white" x-text="lv.student_name"></h3>
+                                            <span class="bg-sky-900 text-sky-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="'Reg: ' + lv.reg_no"></span>
+                                            <span class="bg-purple-900 text-purple-300 text-xs px-2.5 py-0.5 rounded-md font-bold" x-text="lv.leave_type"></span>
+                                        </div>
+                                        <p class="text-slate-400 text-xs mt-1" x-text="'Subject: ' + lv.subject_name + ' | Dates: ' + lv.from_date + ' to ' + lv.to_date + ' | Sent: ' + lv.created_at"></p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span class="px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider"
+                                          :class="lv.status === 'Approved' ? 'bg-emerald-600 text-white' : (lv.status === 'Rejected' ? 'bg-red-600 text-white' : 'bg-amber-500 text-slate-950')"
+                                          x-text="lv.status"></span>
+                                </div>
+                            </div>
+
+                            <div class="py-4 text-sm text-slate-200 bg-slate-950/60 p-4 rounded-2xl my-3 border border-slate-800">
+                                <p class="text-xs font-bold text-sky-400 mb-1">Student Application Content / Reason:</p>
+                                <p class="whitespace-pre-line leading-relaxed font-sans" x-text="lv.reason"></p>
+                                
+                                <!-- Attachment Link in Faculty View -->
+                                <div x-show="lv.doc_data" class="mt-3 pt-3 border-t border-slate-800 flex items-center gap-3">
+                                    <span class="text-xs font-bold text-emerald-400">📎 Attached File:</span>
+                                    <a :href="lv.doc_data" :download="lv.doc_name || 'Medical_Doc.pdf'" target="_blank" class="bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs py-1.5 px-3 rounded-lg shadow flex items-center gap-1">
+                                        <span>📥 View / Download Document (<span x-text="lv.doc_name"></span>)</span>
+                                    </a>
+                                </div>
+                            </div>
+
+                            <div class="pt-2 flex flex-col md:flex-row gap-4 items-center justify-between">
+                                <div class="w-full md:w-2/3">
+                                    <input type="text" x-model="lv.tempRemark" placeholder="Type message/remark for student (e.g., 'Approved for 2 days. Medical report accepted.')..." class="w-full p-2.5 rounded-xl text-xs">
+                                    <p x-show="lv.faculty_remark" class="text-[11px] text-amber-300 font-semibold mt-1" x-text="'Current Saved Note: ' + lv.faculty_remark"></p>
+                                </div>
+                                <div class="flex gap-2 w-full md:w-auto">
+                                    <button @click="updateLeaveStatus(lv.id, 'Approved', lv.tempRemark)" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">✅ APPROVE</button>
+                                    <button @click="updateLeaveStatus(lv.id, 'Rejected', lv.tempRemark)" class="flex-1 md:flex-none bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl text-xs transition shadow">❌ REJECT</button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="facultyLeaves.length === 0" class="text-center p-12 glass-card rounded-3xl text-slate-400 font-bold">
+                        📭 No leave applications submitted yet by students.
+                    </div>
+                </div>
+            </div>
+
             <!-- TAB 7: COLLEGE PROFILE -->
             <div x-show="currentTab === 'profile'">
                 <h2 class="text-2xl font-black text-white mb-4">🏢 Core Settings</h2>
@@ -1696,12 +1728,10 @@ def home():
     </div>
 
 
-    <!-- ============================================== -->
-    <!-- MAIN STUDENT READ-ONLY & LEAVE DASHBOARD        -->
-    <!-- ============================================== -->
+    <!-- ============================================================== -->
+    <!-- STUDENT PORTAL                                                 -->
+    <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'student'" class="min-h-screen relative z-10 p-4 md:p-8" style="display: none;">
-
-        <!-- Header -->
         <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex flex-col sm:flex-row justify-between items-center gap-4 border-t-4 border-emerald-500">
             <div class="flex items-center gap-4">
                 <img :src="studentDashData?.logo || 'https://i.ibb.co/3s68K1v/tree-logo.png'" class="w-16 h-16 bg-white rounded-xl p-1 shadow object-contain">
@@ -1711,7 +1741,6 @@ def home():
                 </div>
             </div>
             <div class="flex items-center gap-3">
-                <!-- Apply Leave Email Button -->
                 <button @click="showLeaveModal = true" class="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black px-6 py-2.5 rounded-xl shadow-lg transition flex items-center gap-2 text-sm">
                     <span>✉️ APPLY LEAVE / EMAIL</span>
                 </button>
@@ -1720,8 +1749,6 @@ def home():
         </div>
 
         <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8" x-show="studentDashData">
-
-            <!-- Left Profile Card -->
             <div class="col-span-1 space-y-6">
                 <div class="bg-slate-900 border-2 border-emerald-500/30 p-6 rounded-3xl shadow-2xl text-center">
                     <div class="text-6xl mb-4">🎓</div>
@@ -1743,17 +1770,14 @@ def home():
                     </div>
                 </div>
 
-                <!-- Quick Apply Leave Banner -->
                 <div class="bg-gradient-to-br from-indigo-950 to-slate-900 border border-indigo-500/40 p-5 rounded-3xl shadow-xl text-center">
                     <h4 class="font-black text-indigo-300 text-sm mb-1">Need Leave or Absence Permission?</h4>
-                    <p class="text-xs text-slate-400 mb-4">Draft and email official leave directly to your teacher's ERP portal.</p>
+                    <p class="text-xs text-slate-400 mb-4">Draft and email official leave directly to your teacher's ERP portal with attached medical reports.</p>
                     <button @click="showLeaveModal = true" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-2.5 rounded-xl text-xs shadow transition">✉️ COMPOSE LEAVE EMAIL</button>
                 </div>
             </div>
 
-            <!-- Right Details Area -->
             <div class="col-span-1 md:col-span-2 space-y-8">
-
                 <!-- Subject Wise Compile Report -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-amber-400 mb-6 flex items-center gap-2">📊 Subject-wise Compilation Report</h3>
@@ -1770,36 +1794,6 @@ def home():
                                 <p class="text-xs font-bold text-slate-400">Classes: <span class="text-white" x-text="sub.present + ' / ' + sub.total"></span></p>
                             </div>
                         </template>
-                    </div>
-                </div>
-
-                <!-- Leave Status & History Tab -->
-                <div class="glass-card p-6 rounded-3xl">
-                    <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-xl font-black text-teal-400 flex items-center gap-2">📬 My Submitted Leave Applications</h3>
-                        <button @click="showLeaveModal = true" class="text-xs bg-emerald-600 text-white font-bold py-1 px-3 rounded-lg shadow">+ New Application</button>
-                    </div>
-                    <div class="space-y-3 max-h-60 overflow-y-auto custom-scrollbar pr-2">
-                        <template x-for="l in (studentDashData.leaves || [])" :key="l.id">
-                            <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-800 text-xs">
-                                <div class="flex justify-between items-start">
-                                    <div>
-                                        <span class="font-black text-sky-300 text-sm" x-text="l.leave_type"></span>
-                                        <span class="text-slate-400 ml-2" x-text="'(' + l.from_date + ' to ' + l.to_date + ')'"></span>
-                                    </div>
-                                    <span class="font-black px-2.5 py-1 rounded-full text-[10px] uppercase"
-                                          :class="l.status === 'Approved' ? 'bg-emerald-900 text-emerald-300 border border-emerald-500' : (l.status === 'Rejected' ? 'bg-red-900 text-red-300 border border-red-500' : 'bg-amber-900 text-amber-300 border border-amber-500')"
-                                          x-text="l.status"></span>
-                                </div>
-                                <p class="text-slate-300 mt-2 font-medium" x-text="l.reason"></p>
-                                <div x-show="l.faculty_remark" class="mt-2 bg-slate-950 p-2.5 rounded-xl border border-amber-500/30 text-amber-300">
-                                    <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
-                                </div>
-                            </div>
-                        </template>
-                        <div x-show="!studentDashData.leaves || studentDashData.leaves.length === 0" class="text-center p-6 text-slate-500 text-xs font-bold">
-                            No leave applications filed yet. Click "Apply Leave / Email" above to submit one.
-                        </div>
                     </div>
                 </div>
 
@@ -1835,13 +1829,47 @@ def home():
                     </div>
                 </div>
 
+                <!-- SUBMITTED LEAVE APPLICATIONS PLACED DIRECTLY UNDER DAILY ATTENDANCE -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-xl font-black text-teal-400 flex items-center gap-2">📬 My Submitted Leave Applications</h3>
+                        <button @click="showLeaveModal = true" class="text-xs bg-emerald-600 text-white font-bold py-1 px-3 rounded-lg shadow">+ New Application</button>
+                    </div>
+                    <div class="space-y-3 max-h-60 overflow-y-auto custom-scrollbar pr-2">
+                        <template x-for="l in (studentDashData.leaves || [])" :key="l.id">
+                            <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-800 text-xs">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <span class="font-black text-sky-300 text-sm" x-text="l.leave_type"></span>
+                                        <span class="text-slate-400 ml-2" x-text="'(' + l.from_date + ' to ' + l.to_date + ')'"></span>
+                                    </div>
+                                    <span class="font-black px-2.5 py-1 rounded-full text-[10px] uppercase"
+                                          :class="l.status === 'Approved' ? 'bg-emerald-900 text-emerald-300 border border-emerald-500' : (l.status === 'Rejected' ? 'bg-red-900 text-red-300 border border-red-500' : 'bg-amber-900 text-amber-300 border border-amber-500')"
+                                          x-text="l.status"></span>
+                                </div>
+                                <p class="text-slate-300 mt-2 font-medium" x-text="l.reason"></p>
+                                <div x-show="l.doc_data" class="mt-2 flex items-center gap-2">
+                                    <span class="text-slate-400">Attached File:</span>
+                                    <a :href="l.doc_data" :download="l.doc_name || 'My_Document.pdf'" target="_blank" class="text-emerald-400 font-bold underline hover:text-emerald-300" x-text="'📎 ' + l.doc_name"></a>
+                                </div>
+                                <div x-show="l.faculty_remark" class="mt-2 bg-slate-950 p-2.5 rounded-xl border border-amber-500/30 text-amber-300">
+                                    <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="!studentDashData.leaves || studentDashData.leaves.length === 0" class="text-center p-6 text-slate-500 text-xs font-bold">
+                            No leave applications filed yet. Click "Apply Leave / Email" above to submit one.
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     </div>
 
 
     <!-- ============================================================== -->
-    <!-- MODAL 1: DEFAULTERS LIST MODAL (ONE-CLICK POPUP)               -->
+    <!-- MODAL 1: DEFAULTERS LIST MODAL                                 -->
     <!-- ============================================================== -->
     <div x-show="showDefaultersModal" class="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50" style="display: none;">
         <div class="bg-slate-900 border-2 border-red-500 w-full max-w-4xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[90vh] flex flex-col">
@@ -1899,25 +1927,23 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- MODAL 2: STUDENT EMAIL / LEAVE COMPOSER MODAL                  -->
+    <!-- MODAL 2: STUDENT EMAIL / LEAVE COMPOSER (WITH PDF ATTACHMENT)  -->
     <!-- ============================================================== -->
     <div x-show="showLeaveModal" class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50" style="display: none;">
         <div class="bg-slate-900 border-2 border-emerald-500 w-full max-w-2xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[95vh] overflow-y-auto custom-scrollbar">
             
-            <!-- Email Window Header -->
             <div class="flex justify-between items-center pb-4 border-b border-slate-700 mb-6">
                 <div class="flex items-center gap-3">
                     <span class="text-3xl">📧</span>
                     <div>
                         <h3 class="text-xl font-black text-white">Official Leave Application Desk</h3>
-                        <p class="text-emerald-400 text-xs font-bold">Compose & send email directly to Faculty Attendance Portal</p>
+                        <p class="text-emerald-400 text-xs font-bold">Compose & send email directly with attached document / medical report</p>
                     </div>
                 </div>
                 <button @click="showLeaveModal = false" class="text-slate-400 hover:text-white font-black text-2xl px-2">✕</button>
             </div>
 
             <form @submit.prevent="submitLeaveApplication" class="space-y-4">
-                <!-- To Header -->
                 <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs flex items-center gap-3">
                     <span class="font-bold text-sky-400">TO (Faculty In-Charge):</span>
                     <span class="font-black text-white" x-text="studentDashData?.faculty_id || 'Class Faculty'"></span>
@@ -1953,13 +1979,20 @@ def home():
 
                 <div>
                     <label class="block text-sky-300 font-bold text-xs mb-1">Application Body / Reason Description</label>
-                    <textarea x-model="leaveForm.reason" rows="5" placeholder="Respected Sir/Ma'am, I am writing this to kindly request leave on the aforementioned dates due to..." required class="w-full p-3 rounded-xl text-xs font-normal leading-relaxed"></textarea>
+                    <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Sir/Ma'am, I am writing this to kindly request leave on the aforementioned dates due to..." required class="w-full p-3 rounded-xl text-xs font-normal leading-relaxed"></textarea>
+                </div>
+
+                <!-- PDF/DOCUMENT ATTACHMENT INPUT -->
+                <div>
+                    <label class="block text-emerald-400 font-bold text-xs mb-1">📎 Attach Medical Certificate / Report / Document (PDF or Image)</label>
+                    <input type="file" id="leaveDocFile" accept=".pdf,.png,.jpg,.jpeg" class="w-full p-2.5 rounded-xl text-xs bg-emerald-50 text-slate-900 border-2 border-emerald-400">
+                    <p class="text-[11px] text-slate-400 mt-1">Optional: Attach doctor slip, prescription, or event participation document.</p>
                 </div>
 
                 <div class="pt-2 flex gap-4">
                     <button type="button" @click="showLeaveModal = false" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-3 rounded-xl text-xs">Cancel</button>
                     <button type="submit" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-xs shadow-lg flex items-center justify-center gap-2">
-                        <span>📤 SEND APPLICATION TO FACULTY</span>
+                        <span>📤 SEND APPLICATION WITH ATTACHMENT</span>
                     </button>
                 </div>
             </form>
@@ -1978,10 +2011,9 @@ def home():
             let curDate = now.toISOString().split('T')[0];
 
             return {
-                // CORE AUTH STATES
                 loggedIn: false,
-                userRole: '', // 'faculty' or 'student'
-                authRole: 'faculty', // UI Tab state
+                userRole: '',
+                authRole: 'faculty',
                 isLogin: true,
                 authForm: { username: '', password: '' },
                 studentForm: { reg_no: '', name: '' },
@@ -1989,7 +2021,6 @@ def home():
                 userId: '',
                 currentTab: 'dashboard',
 
-                // ORIGINAL STATES
                 months: mList,
                 years: yList,
                 collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)',
@@ -2048,7 +2079,6 @@ def home():
                 reportSearchQuery: '',
                 skippedImports: [],
 
-                // LEAVE SYSTEM STATES
                 showLeaveModal: false,
                 leaveForm: {
                     leave_type: 'Medical / Sick Leave',
@@ -2159,6 +2189,11 @@ def home():
                     formData.append('to_date', this.leaveForm.to_date);
                     formData.append('reason', this.leaveForm.reason);
 
+                    let docFile = document.getElementById('leaveDocFile');
+                    if (docFile && docFile.files.length > 0) {
+                        formData.append('doc_file', docFile.files[0]);
+                    }
+
                     try {
                         let res = await fetch('/api/apply_leave', { method: 'POST', body: formData });
                         let data = await res.json();
@@ -2166,6 +2201,7 @@ def home():
                             alert(data.message);
                             this.showLeaveModal = false;
                             this.leaveForm.reason = '';
+                            if (docFile) docFile.value = '';
                             this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
                         } else {
                             alert("Failed to submit: " + (data.detail || 'Error'));
@@ -2308,7 +2344,7 @@ def home():
                             this.loadTableData(); 
                         }
                     } catch(e) {
-                        alert("Network error while updating attendance. Please check your connection.");
+                        alert("Network error while updating attendance.");
                         this.loadTableData();
                     }
                 },
@@ -2650,4 +2686,3 @@ def home():
     </script>
 </body>
 </html>
-"""

@@ -12,14 +12,12 @@ from sqlalchemy.pool import NullPool
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
-# Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     try:
         import streamlit as st
         DATABASE_URL = st.secrets["DATABASE_URL"]
     except Exception:
-        # Fallback default DB for testing
         DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
 
 if DATABASE_URL.startswith("postgres://"):
@@ -62,13 +60,10 @@ def init_tenant_db(user_id):
     t_leaves = f"{safe_uid}_leaves"
 
     with engine.begin() as conn:
-        # Create core tables
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_students} (id SERIAL PRIMARY KEY, reg_no TEXT UNIQUE, roll_no TEXT, name TEXT)'))
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_subjects} (id SERIAL PRIMARY KEY, subject_name TEXT UNIQUE)'))
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_attendance} (id SERIAL PRIMARY KEY, student_id INTEGER, subject_id INTEGER, date TEXT, status TEXT, UNIQUE(student_id, subject_id, date))'))
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_settings} (key TEXT PRIMARY KEY, value TEXT)'))
-        
-        # Details Table
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_details} (
             reg_no TEXT PRIMARY KEY,
             email TEXT,
@@ -83,7 +78,6 @@ def init_tenant_db(user_id):
         except Exception:
             pass
 
-        # Leave Management Table
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_leaves} (
             id SERIAL PRIMARY KEY,
             reg_no TEXT,
@@ -98,7 +92,6 @@ def init_tenant_db(user_id):
             applied_on TEXT
         )'''))
 
-        # Performance Indexes (Removes lag)
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_perf ON {t_attendance} (subject_id, date, status)'))
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_stu ON {t_attendance} (student_id, status)'))
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_stu_reg ON {t_students} (reg_no)'))
@@ -148,13 +141,13 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
             t_students = f"{safe_uid}_students"
             try:
                 conn.execute(text(f"SELECT 1 FROM {t_students} LIMIT 1"))
-                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
+                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r) AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
                 if st:
                     return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
             except Exception:
                 continue
 
-    raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
+    raise HTTPException(status_code=400, detail="Student not found. Please check Registration Number and Name spelling.")
 
 @app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
@@ -166,8 +159,10 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
     t_leaves = f"{safe_uid}_leaves"
 
     with engine.begin() as conn:
-        st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE reg_no=:r"), {"r": reg_no}).fetchone()
-        if not st: return {"error": "Student not found"}
+        st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": reg_no.strip()}).fetchone()
+        if not st: 
+            return {"error": "Student records not found in database."}
+        
         st_id, st_name, st_roll = st[0], st[1], st[2]
 
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
@@ -204,8 +199,8 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             leave_rows = conn.execute(text(f"""
                 SELECT id, leave_type, start_date, end_date, subject, reason, status, faculty_remark, applied_on 
                 FROM {t_leaves} 
-                WHERE reg_no=:r ORDER BY id DESC
-            """), {"r": reg_no}).fetchall()
+                WHERE LOWER(reg_no)=LOWER(:r) ORDER BY id DESC
+            """), {"r": reg_no.strip()}).fetchall()
 
             leaves = [{
                 "id": r[0], "leave_type": r[1], "start_date": r[2], "end_date": r[3],
@@ -254,9 +249,9 @@ def submit_leave(
                 INSERT INTO {t_leaves} (reg_no, student_name, leave_type, start_date, end_date, subject, reason, status, applied_on)
                 VALUES (:r, :n, :lt, :sd, :ed, :sb, :rs, 'Pending', :ao)
             """), {"r": reg_no.strip(), "n": student_name.strip(), "lt": leave_type, "sd": start_date, "ed": end_date, "sb": subject, "rs": reason, "ao": applied_on})
-        return {"success": True, "message": "Leave Application submitted successfully to class faculty!"}
+        return {"success": True, "message": "Leave application submitted successfully."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to submit application: " + str(e))
+        raise HTTPException(status_code=500, detail="Submission failed: " + str(e))
 
 @app.get("/api/leaves/{user_id}")
 def get_faculty_leaves(user_id: str):
@@ -278,10 +273,9 @@ def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), sta
     try:
         with engine.begin() as conn:
             conn.execute(text(f"UPDATE {t_leaves} SET status=:st, faculty_remark=:rm WHERE id=:lid"), {"st": status, "rm": remark.strip(), "lid": leave_id})
-        return {"success": True, "message": f"Leave application marked as {status}."}
+        return {"success": True, "message": f"Leave status updated to {status}."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error updating leave status: " + str(e))
-
+        raise HTTPException(status_code=500, detail="Update failed: " + str(e))
 
 # ==========================================
 # FACULTY CORE API
@@ -568,7 +562,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     except ImportError:
-        raise HTTPException(status_code=500, detail="ReportLab not installed")
+        raise HTTPException(status_code=500, detail="ReportLab library not installed.")
 
     safe_uid = get_safe_prefix(user_id)
     t_students = f"{safe_uid}_students"
@@ -697,7 +691,7 @@ def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: s
                     sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
                     if sub_res:
                         conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"dt": date_str, "subid": sub_res[0]})
-        return {"success": True, "message": "Attendance logs reset executed successfully!"}
+        return {"success": True, "message": "Attendance logs reset executed successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -710,7 +704,7 @@ def delete_all_students(user_id: str = Form(...)):
             conn.execute(text(f"DELETE FROM {safe_uid}_student_details"))
             conn.execute(text(f"DELETE FROM {safe_uid}_leaves"))
             conn.execute(text(f"DELETE FROM {safe_uid}_students"))
-        return {"success": True, "message": "All students and their records deleted successfully!"}
+        return {"success": True, "message": "All students and associated records deleted permanently."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -764,7 +758,7 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
                     pass
 
             conn.execute(text(f"INSERT INTO {t_students} (reg_no, roll_no, name) VALUES (:r, :ro, :n) ON CONFLICT (reg_no) DO NOTHING"), {"r": reg_clean, "ro": roll_no.strip(), "n": name.strip()})
-        return {"success": True, "message": "Student added successfully!"}
+        return {"success": True, "message": "Student added successfully."}
     except HTTPException:
         raise
     except Exception as e:
@@ -777,7 +771,7 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
         t_students = f"{safe_uid}_students"
         with engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {t_students} WHERE reg_no=:r"), {"r": reg_no.strip()})
-        return {"success": True, "message": "Student deleted successfully!"}
+        return {"success": True, "message": "Student deleted successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -814,7 +808,7 @@ async def import_students(user_id: str = Form(...), file: UploadFile = File(...)
         if not mapped_name and len(cols) > 2: mapped_name = cols[2]
 
         if not mapped_reg or not mapped_name:
-            raise HTTPException(status_code=400, detail="Error: Could not find Reg No and Name columns in file.")
+            raise HTTPException(status_code=400, detail="Could not find Registration Number and Name columns in file.")
 
         inserted_students = 0
         skipped_list = []
@@ -919,13 +913,13 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 mapped_att = cols[-1]
 
         if not mapped_reg or not mapped_att:
-            raise HTTPException(status_code=400, detail="Error: File must contain Reg No and Attendance Status columns.")
+            raise HTTPException(status_code=400, detail="File must contain Registration Number and Attendance Status columns.")
 
         inserted_att = 0
         with engine.begin() as conn:
             sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
             if not sub_id_res:
-                 raise HTTPException(status_code=400, detail="Error: Selected Subject not found in database.")
+                 raise HTTPException(status_code=400, detail="Selected subject not found in database.")
             sub_id = sub_id_res[0]
 
             for _, row in df_raw.iterrows():
@@ -953,7 +947,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                             """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
                             inserted_att += 1
 
-        return {"success": True, "message": f"Successfully marked attendance for {inserted_att} students on {date_str} for subject {subject}."}
+        return {"success": True, "message": f"Successfully recorded attendance for {inserted_att} students on {date_str} ({subject})."}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail="Attendance Import Failed: " + str(e))
@@ -965,7 +959,7 @@ def add_subject(user_id: str = Form(...), subject_name: str = Form(...)):
         t_subjects = f"{safe_uid}_subjects"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": subject_name.strip()})
-        return {"success": True, "message": "Subject added successfully!"}
+        return {"success": True, "message": "Subject added successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -976,7 +970,7 @@ def delete_subject(user_id: str = Form(...), subject_name: str = Form(...)):
         t_subjects = f"{safe_uid}_subjects"
         with engine.begin() as conn:
             conn.execute(text(f"DELETE FROM {t_subjects} WHERE subject_name=:s"), {"s": subject_name.strip()})
-        return {"success": True, "message": "Subject deleted successfully!"}
+        return {"success": True, "message": "Subject deleted successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -990,7 +984,7 @@ async def upload_logo(user_id: str = Form(...), file: UploadFile = File(...)):
         b64_val = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_logo', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": b64_val})
-        return {"success": True, "logo_url": b64_val, "message": "Logo uploaded successfully!"}
+        return {"success": True, "logo_url": b64_val, "message": "Logo uploaded successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -1004,7 +998,7 @@ def save_college_profile(user_id: str = Form(...), college_name: str = Form(...)
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('app_subtitle', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": subtitle})
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('course_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": course_name})
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('section_name', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": section_name})
-        return {"success": True, "message": "College profile updated successfully!"}
+        return {"success": True, "message": "College profile updated successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -1033,12 +1027,12 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
                     ON CONFLICT (reg_no) 
                     DO UPDATE SET email = EXCLUDED.email, contact = EXCLUDED.contact, parent_name = EXCLUDED.parent_name, parent_contact = EXCLUDED.parent_contact, res_type = EXCLUDED.res_type
                 """), {"r": reg_no.strip(), "e": email, "c": contact, "pn": parent_name, "pc": parent_contact, "rt": res_type})
-        return {"success": True, "message": "Student profile saved successfully!"}
+        return {"success": True, "message": "Student profile saved successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
-# FULL HTML FRONTEND
+# FRONTEND UI
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -1083,20 +1077,20 @@ def home():
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
-                <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the professional Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
+                <p class="text-slate-300 text-sm leading-relaxed mb-6">Welcome to the Multi-Tenant Attendance ERP Platform. Select your portal to proceed securely.</p>
                 <div class="space-y-4">
                     <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">👨‍🏫</div>
                         <div>
                             <p class="text-sky-300 font-bold text-sm">Faculty Login</p>
-                            <p class="text-slate-400 text-xs">For Teachers and Admins to mark attendance and manage records.</p>
+                            <p class="text-slate-400 text-xs">For Teachers and Admins to manage class attendance.</p>
                         </div>
                     </div>
                     <div class="bg-emerald-950/60 border border-emerald-500/40 p-4 rounded-xl flex items-center gap-4">
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">Read-Only access for students to track attendance and submit leave requests.</p>
+                            <p class="text-slate-400 text-xs">Read-Only access for students to view attendance and apply for leaves.</p>
                         </div>
                     </div>
                 </div>
@@ -1127,15 +1121,15 @@ def home():
                 </div>
 
                 <div x-show="authRole === 'student'">
-                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only & Leave Access</p>
+                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Secure Read-Only Access</p>
                     <form @submit.prevent="submitStudentAuth" class="space-y-4">
                         <div>
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
-                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Registration No." required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
                         </div>
                         <div>
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
-                            <input type="text" x-model="studentForm.name" placeholder="Enter your full name as registered" required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
+                            <input type="text" x-model="studentForm.name" placeholder="Enter exact full name" required class="w-full p-3 rounded-xl text-sm border-emerald-400 focus:border-emerald-500">
                         </div>
                         <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">ACCESS STUDENT PORTAL</button>
                     </form>
@@ -1155,7 +1149,7 @@ def home():
                     <img :src="collegeLogo" class="w-24 h-24 rounded-full bg-white p-1 border-4 border-sky-400 shadow-lg mb-2 object-contain">
                     <span class="text-yellow-400 font-bold text-sm" x-text="'User: ' + userId"></span>
                 </div>
-                <p class="text-slate-400 text-xs font-bold mb-2">Navigate Pages:</p>
+                <p class="text-slate-400 text-xs font-bold mb-2">Navigation:</p>
                 <nav class="space-y-2 text-sm font-black">
                     <button @click="currentTab = 'dashboard'; loadData()" :class="currentTab === 'dashboard' ? 'bg-blue-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-blue-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📊 Dashboard</button>
                     <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
@@ -1167,7 +1161,7 @@ def home():
                     <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
                 </nav>
             </div>
-            <button @click="logout" class="bg-emerald-500 hover:bg-emerald-600 py-3 rounded-xl font-black text-center shadow-lg transition relative z-10">🚪 LOGOUT FROM PORTAL</button>
+            <button @click="logout" class="bg-emerald-500 hover:bg-emerald-600 py-3 rounded-xl font-black text-center shadow-lg transition relative z-10">🚪 LOGOUT</button>
         </div>
 
         <div class="flex-1 flex flex-col overflow-y-auto p-6">
@@ -1226,12 +1220,12 @@ def home():
                     </div>
                 </div>
 
-                <!-- DEFAULTERS LIST (DIRECTLY BELOW DASHBOARD METRICS) -->
+                <!-- DEFAULTERS LIST -->
                 <div class="glass-card p-6 rounded-3xl border-2 border-red-500/40 shadow-2xl">
                     <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
                         <div>
                             <h3 class="text-xl font-black text-red-400 flex items-center gap-2">⚠️ Defaulters List (&lt; <span x-text="defaulterThreshold"></span>% Attendance)</h3>
-                            <p class="text-xs text-slate-300">Identify all students currently in the critical shortage zone for <span class="text-amber-300 font-bold" x-text="selectedMonth + ' ' + selectedYear"></span>.</p>
+                            <p class="text-xs text-slate-300">Identify students with low attendance for <span class="text-amber-300 font-bold" x-text="selectedMonth + ' ' + selectedYear"></span>.</p>
                         </div>
                         <div class="flex items-center gap-3">
                             <div class="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-700">
@@ -1244,7 +1238,7 @@ def home():
                     </div>
 
                     <div class="mb-4" x-show="defaulterListLoaded">
-                        <input type="text" x-model="defaulterSearchQuery" placeholder="🔍 Search defaulter by Name or Reg No..." class="w-full p-2.5 rounded-xl text-xs shadow">
+                        <input type="text" x-model="defaulterSearchQuery" placeholder="🔍 Search defaulter by Name or Registration No..." class="w-full p-2.5 rounded-xl text-xs shadow">
                     </div>
 
                     <div x-show="defaulterListLoaded" class="bg-sky-100 rounded-xl overflow-x-auto border border-red-400/60 max-h-72 custom-scrollbar">
@@ -1269,7 +1263,7 @@ def home():
                                     </tr>
                                 </template>
                                 <tr x-show="filteredDefaulters.length === 0">
-                                    <td colspan="5" class="p-4 text-slate-600 font-bold text-center">🎉 No defaulters found below the selected threshold!</td>
+                                    <td colspan="5" class="p-4 text-slate-600 font-bold text-center">No defaulters found below the selected threshold.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1329,8 +1323,8 @@ def home():
                             <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition transform active:scale-95">🔴 MARK ABSENT (A)</button>
                         </div>
                         <div>
-                            <label class="block text-white font-bold text-sm mb-1">🔍 Search Student Directly by Reg No:</label>
-                            <input type="text" x-model="searchReg" @input="searchByReg" placeholder="Type exact Registration Number here..." class="w-full p-3 rounded-xl shadow">
+                            <label class="block text-white font-bold text-sm mb-1">🔍 Search Student by Registration No:</label>
+                            <input type="text" x-model="searchReg" @input="searchByReg" placeholder="Type exact Registration Number..." class="w-full p-3 rounded-xl shadow">
                         </div>
                         <div>
                             <label class="block text-white font-bold text-sm mb-1">🔍 Quick Jump to Student</label>
@@ -1366,10 +1360,10 @@ def home():
                 </div>
 
                 <div class="mb-4">
-                    <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow">
+                    <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search student by Name, Registration No, or Roll No..." class="w-full p-3 rounded-xl shadow">
                 </div>
 
-                <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: You can click directly on any box below to toggle Attendance (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
+                <p class="text-sky-300 font-bold text-xs mb-2">💡 Tip: Click on any day cell to cycle status (1 Click = Present, 2 Clicks = Absent, 3 Clicks = Clear).</p>
 
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
                     <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table border-collapse">
@@ -1418,13 +1412,11 @@ def home():
                 <div class="flex gap-4 mb-6">
                     <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
                     <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
-                    
-                    <!-- RESTORED: SHARE VIA EMAIL/PDF BUTTON -->
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
 
                 <div class="mb-6">
-                    <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search specific student by Name, Reg No, or Roll No..." class="w-full p-3 rounded-xl shadow">
+                    <input type="text" x-model="reportSearchQuery" placeholder="🔍 Search student by Name, Registration No, or Roll No..." class="w-full p-3 rounded-xl shadow">
                 </div>
 
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
@@ -1461,7 +1453,7 @@ def home():
                         <label class="block text-sky-400 font-bold mb-2">Select Reset Scope:</label>
                         <div class="grid grid-cols-3 gap-4">
                             <button @click="resetScope = 'single'" :class="resetScope === 'single' ? 'bg-emerald-600 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">👤 Single Student Reset</button>
-                            <button @click="resetScope = 'class'" :class="resetScope === 'class' ? 'bg-red-600 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">🏫 Entire Class Bulk Reset</button>
+                            <button @click="resetScope = 'class'" :class="resetScope === 'class' ? 'bg-red-600 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">🏫 Entire Class Reset</button>
                             <button @click="resetScope = 'date'" :class="resetScope === 'date' ? 'bg-red-700 border-2 border-yellow-300' : 'bg-slate-800'" class="p-4 rounded-xl font-bold shadow transition">📅 Specific Date Reset</button>
                         </div>
                     </div>
@@ -1486,7 +1478,7 @@ def home():
                 <div class="grid grid-cols-2 gap-6">
                     <div class="glass-card p-6 rounded-2xl border-2 border-blue-400">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register New Students (Excel/CSV)</h3>
-                        <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Reg No, and Name.</p>
+                        <p class="text-xs text-slate-300 mb-4">Upload a file containing Roll No, Registration No, and Name.</p>
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
                         <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow transition">Add Students to Database</button>
                         <div x-show="skippedImports.length > 0" class="mt-4 bg-red-900/40 border border-red-500/50 p-4 rounded-xl text-xs" style="display: none;">
@@ -1544,23 +1536,23 @@ def home():
                                 <option>🏠 HOSTELER (Hostel Resident)</option>
                                 <option>🚌 DAY SCHOLAR (Regular / Up-Down)</option>
                             </select>
-                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Complete Profile</button>
+                            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-2.5 rounded-xl shadow">Save Profile</button>
                         </form>
                     </div>
 
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Danger Zone: Delete All Students</h3>
-                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all students, personal details, leaves, and attendance records from your class database.</p>
-                        <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
+                        <p class="text-sm text-slate-300 mb-4">This action will permanently remove all student records, personal details, leaves, and attendance data from your database.</p>
+                        <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data</button>
                     </div>
                 </div>
             </div>
 
-            <!-- TAB: LEAVE REQUESTS (FACULTY PORTAL - PLACED BETWEEN MANAGE STUDENTS AND COLLEGE PROFILE) -->
+            <!-- TAB: LEAVE REQUESTS -->
             <div x-show="currentTab === 'leaves'">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-2xl font-black text-white flex items-center gap-2">📩 Student Leave Applications</h2>
-                    <button @click="loadFacultyLeaves" class="bg-teal-600 hover:bg-teal-700 px-4 py-2 rounded-xl font-bold text-xs shadow">🔄 Refresh Applications</button>
+                    <button @click="loadFacultyLeaves" class="bg-teal-600 hover:bg-teal-700 px-4 py-2 rounded-xl font-bold text-xs shadow">🔄 Refresh</button>
                 </div>
 
                 <div class="glass-card p-6 rounded-3xl space-y-4">
@@ -1593,7 +1585,7 @@ def home():
                         </div>
                     </template>
                     <div x-show="facultyLeaves.length === 0" class="text-center p-8 text-slate-400 font-bold">
-                        📪 No student leave requests received yet.
+                        No student leave requests received yet.
                     </div>
                 </div>
             </div>
@@ -1643,9 +1635,9 @@ def home():
                             </form>
                         </div>
                         <div class="glass-card p-6 rounded-2xl">
-                            <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ College Logo (Cloud Secured)</h3>
+                            <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ College Logo</h3>
                             <input type="file" id="logoFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                            <button @click="uploadLogo" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Upload Logo to Cloud</button>
+                            <button @click="uploadLogo" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-black py-3 rounded-xl shadow">Upload Logo</button>
                         </div>
                     </div>
                 </div>
@@ -1687,14 +1679,14 @@ def home():
                             </div>
                         </div>
                         <p class="mt-4 text-xs font-bold" :class="studentDashData.overall_pct >= 75 ? 'text-emerald-400' : 'text-red-400'">
-                            <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Zone' : '⚠️ Shortage Zone'"></span>
+                            <span x-text="studentDashData.overall_pct >= 75 ? 'Safe Zone (>= 75%)' : 'Shortage Zone (< 75%)'"></span>
                         </p>
                     </div>
                 </div>
             </div>
 
             <div class="col-span-1 md:col-span-2 space-y-8">
-                <!-- Subject Wise Compile Report -->
+                <!-- Subject-wise Compile Report -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-amber-400 mb-6 flex items-center gap-2">📊 Subject-wise Compilation Report</h3>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1715,7 +1707,7 @@ def home():
 
                 <!-- Complete Attendance History -->
                 <div class="glass-card p-6 rounded-3xl">
-                    <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Daily Attendance Register (P/A History)</h3>
+                    <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Daily Attendance Register (History)</h3>
                     <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
                         <table class="w-full text-left text-sm">
                             <thead class="sticky top-0 bg-slate-900/90 text-sky-400 font-bold backdrop-blur">
@@ -1738,14 +1730,14 @@ def home():
                                     </tr>
                                 </template>
                                 <tr x-show="studentDashData.history.length === 0">
-                                    <td colspan="3" class="text-center p-6 text-slate-500">No attendance records found yet.</td>
+                                    <td colspan="3" class="text-center p-6 text-slate-500">No attendance records found.</td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
                 </div>
 
-                <!-- MY SUBMITTED LEAVE APPLICATIONS (DIRECTLY BELOW DAILY ATTENDANCE) -->
+                <!-- SUBMITTED LEAVE APPLICATIONS -->
                 <div class="glass-card p-6 rounded-3xl border-2 border-teal-500/40">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-xl font-black text-teal-300 flex items-center gap-2">📑 My Submitted Leave Applications</h3>
@@ -1775,11 +1767,11 @@ def home():
         </div>
     </div>
 
-    <!-- STUDENT LEAVE APPLICATION MODAL (EMAIL CLIENT STYLE) -->
+    <!-- STUDENT LEAVE APPLICATION MODAL -->
     <div x-show="showLeaveModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" style="display: none;">
         <div class="bg-slate-900 border-2 border-sky-400 rounded-3xl p-6 w-full max-w-2xl shadow-2xl space-y-4">
             <div class="flex justify-between items-center border-b border-slate-700 pb-3">
-                <h3 class="text-lg font-black text-white flex items-center gap-2">✉️ New Leave Application Compose Box</h3>
+                <h3 class="text-lg font-black text-white flex items-center gap-2">✉️ Compose Leave Application</h3>
                 <button @click="showLeaveModal = false" class="text-slate-400 hover:text-white font-black text-lg">✕</button>
             </div>
             <form @submit.prevent="submitLeaveApplication" class="space-y-4">
@@ -1811,18 +1803,18 @@ def home():
                 </div>
 
                 <div>
-                    <label class="block text-sky-400 text-xs font-bold mb-1">Subject / Reason Heading</label>
-                    <input type="text" x-model="leaveForm.subject" placeholder="e.g. Application for 2 days sick leave due to viral fever" required class="w-full p-2.5 rounded-xl text-xs">
+                    <label class="block text-sky-400 text-xs font-bold mb-1">Subject</label>
+                    <input type="text" x-model="leaveForm.subject" placeholder="e.g. Request for medical leave" required class="w-full p-2.5 rounded-xl text-xs">
                 </div>
 
                 <div>
-                    <label class="block text-sky-400 text-xs font-bold mb-1">Detailed Explanation (Mail Body)</label>
-                    <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Faculty, I am writing to formally request leave because..." required class="w-full p-3 rounded-xl text-xs"></textarea>
+                    <label class="block text-sky-400 text-xs font-bold mb-1">Reason / Explanation</label>
+                    <textarea x-model="leaveForm.reason" rows="4" placeholder="State your reason clearly..." required class="w-full p-3 rounded-xl text-xs"></textarea>
                 </div>
 
                 <div class="flex gap-3 justify-end pt-2">
-                    <button type="button" @click="showLeaveModal = false" class="bg-slate-700 hover:bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl text-xs">Discard</button>
-                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-2.5 rounded-xl text-xs shadow-lg">Send Application</button>
+                    <button type="button" @click="showLeaveModal = false" class="bg-slate-700 hover:bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl text-xs">Cancel</button>
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-2.5 rounded-xl text-xs shadow-lg">Submit Application</button>
                 </div>
             </form>
         </div>
@@ -1834,7 +1826,7 @@ def home():
             <h3 class="text-base font-black text-white" x-text="'Confirm ' + actionStatus + ' for ' + activeLeave?.student_name"></h3>
             <div>
                 <label class="block text-slate-300 text-xs font-bold mb-1">Optional Feedback / Message to Student:</label>
-                <textarea x-model="actionRemark" rows="3" placeholder="e.g., Approved. Please submit medical certificates upon returning." class="w-full p-2.5 rounded-xl text-xs"></textarea>
+                <textarea x-model="actionRemark" rows="3" placeholder="Provide feedback or remarks..." class="w-full p-2.5 rounded-xl text-xs"></textarea>
             </div>
             <div class="flex gap-3 justify-end">
                 <button type="button" @click="showActionModal = false" class="bg-slate-700 text-white font-bold px-4 py-2 rounded-xl text-xs">Cancel</button>
@@ -1918,13 +1910,11 @@ def home():
                 reportSearchQuery: '',
                 skippedImports: [],
 
-                // DEFAULTERS LIST STATES
                 defaulterThreshold: 75,
                 defaultersList: [],
                 defaulterListLoaded: false,
                 defaulterSearchQuery: '',
 
-                // LEAVE MANAGEMENT STATES
                 showLeaveModal: false,
                 leaveForm: { leave_type: 'Sick Leave (Medical)', start_date: curDate, end_date: curDate, subject: '', reason: '' },
                 facultyLeaves: [],
@@ -1979,7 +1969,7 @@ def home():
                             this.authError = data.detail || "Authentication Failed.";
                         }
                     } catch(e) {
-                        this.authError = "Server Connection Error.";
+                        this.authError = "Server connection error.";
                     }
                 },
 
@@ -2000,7 +1990,7 @@ def home():
                             this.authError = data.detail || "Student Login Failed.";
                         }
                     } catch(e) {
-                        this.authError = "Server Connection Error.";
+                        this.authError = "Server connection error.";
                     }
                 },
 
@@ -2286,7 +2276,7 @@ def home():
                 },
 
                 async deleteAllStudents() {
-                    if (!confirm("WARNING: Are you entirely sure you want to delete ALL students and their records? This action cannot be undone.")) return;
+                    if (!confirm("WARNING: Are you sure you want to delete all students and records? This action cannot be undone.")) return;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
@@ -2450,7 +2440,6 @@ def home():
                     }
                 },
 
-                // RESTORED SHARE PDF FUNCTION
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
@@ -2463,17 +2452,16 @@ def home():
                             await navigator.share({ files: [file] });
                             return; 
                         } else {
-                            throw new Error("Sharing not supported");
+                            throw new Error("Direct sharing not supported on this browser.");
                         }
                     } catch(e) {
-                        // Fallback
                         let a = document.createElement('a');
                         a.href = pdfUrl;
                         a.download = fileName;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
-                        alert("PDF Downloaded successfully! You can now manually share the file via Email/WhatsApp.");
+                        alert("PDF downloaded successfully. You can now manually share the document.");
                     }
                 },
 

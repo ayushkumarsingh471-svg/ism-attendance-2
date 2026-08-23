@@ -6,7 +6,7 @@ import calendar
 from datetime import datetime, date
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
@@ -64,6 +64,7 @@ def init_tenant_db(user_id):
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_subjects} (id SERIAL PRIMARY KEY, subject_name TEXT UNIQUE)'))
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_attendance} (id SERIAL PRIMARY KEY, student_id INTEGER, subject_id INTEGER, date TEXT, status TEXT, UNIQUE(student_id, subject_id, date))'))
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_settings} (key TEXT PRIMARY KEY, value TEXT)'))
+        
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_details} (
             reg_no TEXT PRIMARY KEY,
             email TEXT,
@@ -101,9 +102,6 @@ def init_tenant_db(user_id):
             for sub in ['SAD', 'PST&PC', 'NT', 'BE', 'OS&UNIX LAB', 'PROG IN C LAB']:
                 conn.execute(text(f"INSERT INTO {t_subjects} (subject_name) VALUES (:sub) ON CONFLICT DO NOTHING"), {"sub": sub})
 
-# ==========================================
-# AUTHENTICATION API
-# ==========================================
 
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
@@ -128,10 +126,11 @@ def register(username: str = Form(...), password: str = Form(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Faculty ID already exists. Please choose another.")
 
+
 @app.post("/api/student_login")
 def student_login(reg_no: str = Form(...), name: str = Form(...)):
     r_no = reg_no.strip()
-    s_name = name.strip()
+    s_name = " ".join(name.strip().split()).lower()
 
     with engine.begin() as conn:
         faculties = conn.execute(text("SELECT username FROM master_users")).fetchall()
@@ -141,15 +140,19 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
             t_students = f"{safe_uid}_students"
             try:
                 conn.execute(text(f"SELECT 1 FROM {t_students} LIMIT 1"))
-                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r) AND LOWER(name)=LOWER(:n)"), {"r": r_no, "n": s_name}).fetchone()
+                st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": r_no}).fetchone()
                 if st:
-                    return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
+                    db_name = " ".join(st[1].strip().split()).lower()
+                    if s_name in db_name or db_name in s_name:
+                        return {"success": True, "faculty_id": f_id, "reg_no": r_no, "name": st[1]}
+                    else:
+                        raise HTTPException(status_code=400, detail="Registration Number found, but the Name does not match our records.")
             except Exception:
                 continue
 
-    raise HTTPException(status_code=400, detail="Student not found. Please check Registration Number and Name spelling.")
+    raise HTTPException(status_code=400, detail="Student Registration Number not found in any active class.")
 
-@app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
+@app.get("/api/student_dashboard_data/{faculty_id}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
     safe_uid = get_safe_prefix(faculty_id)
     t_students = f"{safe_uid}_students"
@@ -225,10 +228,6 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             "logo": get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
         }
 
-# ==========================================
-# LEAVE MANAGEMENT API
-# ==========================================
-
 @app.post("/api/submit_leave")
 def submit_leave(
     faculty_id: str = Form(...),
@@ -276,10 +275,6 @@ def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), sta
         return {"success": True, "message": f"Leave status updated to {status}."}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Update failed: " + str(e))
-
-# ==========================================
-# FACULTY CORE API
-# ==========================================
 
 @app.get("/api/data/{user_id}")
 def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE", target_date: str = "2026-07-25"):
@@ -708,7 +703,7 @@ def delete_all_students(user_id: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-@app.get("/api/student_details/{user_id}/{reg_no}")
+@app.get("/api/student_details/{user_id}")
 def get_student_profile(user_id: str, reg_no: str):
     safe_uid = get_safe_prefix(user_id)
     t_details = f"{safe_uid}_student_details"
@@ -751,7 +746,7 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
                 try:
                     exists = conn.execute(text(f"SELECT 1 FROM {other_t} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": reg_clean}).fetchone()
                     if exists:
-                        raise HTTPException(status_code=400, detail="This Registration Number is already registered in another class.")
+                        raise HTTPException(status_code=400, detail="Registration Number is already registered in another class.")
                 except HTTPException:
                     raise
                 except Exception:
@@ -1996,7 +1991,8 @@ def home():
 
                 async loadStudentDashboard(fac_id, reg_no) {
                     try {
-                        let res = await fetch(`/api/student_dashboard_data/${fac_id}/${reg_no}`);
+                        let res = await fetch(`/api/student_dashboard_data/${fac_id}?reg_no=${encodeURIComponent(reg_no)}`);
+                        if (!res.ok) throw new Error("Network request failed");
                         let data = await res.json();
                         if (data.error) {
                             alert(data.error);
@@ -2005,7 +2001,9 @@ def home():
                             this.studentDashData = data;
                         }
                     } catch (e) {
-                        alert("Error loading student dashboard.");
+                        console.error("Dashboard Load Error:", e);
+                        alert("Error loading student dashboard. Please verify the URL or contact the administrator.");
+                        this.logout();
                     }
                 },
 
@@ -2208,10 +2206,14 @@ def home():
                 async fetchStudentDetails() {
                     let reg = this.currentStudent.reg_no;
                     if (!reg) return;
-                    let res = await fetch(`/api/student_details/${this.userId}/${reg}`);
-                    let data = await res.json();
-                    this.currentStudentDetails = data;
-                    this.currentStudentPhoto = data.photo_data;
+                    try {
+                        let res = await fetch(`/api/student_details/${this.userId}?reg_no=${encodeURIComponent(reg)}`);
+                        let data = await res.json();
+                        this.currentStudentDetails = data;
+                        this.currentStudentPhoto = data.photo_data || "https://cdn-icons-png.flaticon.com/512/3135/3135715.png";
+                    } catch(e) {
+                        console.error("Profile Fetch Error:", e);
+                    }
                 },
 
                 async markStatusBtn(status) {

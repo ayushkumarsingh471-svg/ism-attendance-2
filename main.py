@@ -90,7 +90,6 @@ def init_tenant_db(user_id):
             created_at TEXT DEFAULT ''
         )'''))
         
-        # Schema Migrations for existing tables
         try:
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
         except Exception:
@@ -131,7 +130,7 @@ def register(username: str = Form(...), password: str = Form(...)):
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO master_users (username, password) VALUES (:u, :p)"), {"u": u, "p": password})
         init_tenant_db(u)
-        return {"success": True}
+        return {"success": True, "message": "Portal registered successfully! You can now login."}
     except Exception:
         raise HTTPException(status_code=400, detail="Faculty ID already exists. Please choose another.")
 
@@ -226,7 +225,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             except Exception:
                 return def_v
 
-        college_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
+        college_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)')
         subtitle = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
         course = get_cfg('course_name', 'BCA')
         sec = get_cfg('section_name', 'Semester 1')
@@ -382,10 +381,10 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
             return res[0] if res and res[0] else def_v
 
-        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
+        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)')
         c_sub = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
         c_course = get_cfg('course_name', 'BCA')
-        c_sec = get_cfg('section_name', 'Semester 3A')
+        c_sec = get_cfg('section_name', 'Semester 1')
         logo_url = get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
 
     return {
@@ -681,7 +680,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
-        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT PATNA"
+        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
 
         headers = ["Roll No", "Reg No", "Name"] + subjects + ["Overall %"]
         table_data = [headers]
@@ -1081,7 +1080,7 @@ async def upload_logo(user_id: str = Form(...), file: UploadFile = File(...)):
         b64_val = f"data:image/{ext};base64,{base64.b64encode(contents).decode('utf-8')}"
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {t_settings} (key, value) VALUES ('college_logo', :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"v": b64_val})
-        return {"success": True, "logo_url": b64_val, "message": "Logo uploaded successfully!"}
+        return {"success": True, "logo_url": b64_val, "message": "College logo updated and stored securely!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -1129,7 +1128,7 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
-# FRONTEND UI
+# FRONTEND UI (COMPLETE & UNIFIED)
 # ==========================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -1386,19 +1385,23 @@ def home():
                 </div>
 
                 <div class="grid grid-cols-2 gap-8 items-start" x-show="students.length > 0">
-                    <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 p-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full">
-                        <div class="bg-gradient-to-r from-emerald-700 to-emerald-900 text-white p-3 rounded-xl flex items-center gap-3 border-b-4 border-amber-400 mb-3">
-                            <img :src="collegeLogo" class="w-8 h-8 bg-white rounded-full p-0.5 object-contain">
-                            <div class="text-[11px] font-black leading-tight" x-text="collegeName.toUpperCase()"></div>
+                    
+                    <!-- ID CARD UI - ENLARGED -->
+                    <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 py-10 px-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full min-h-[460px] flex flex-col justify-between relative">
+                        <div>
+                            <div class="bg-gradient-to-r from-emerald-700 to-emerald-900 text-white p-3 rounded-xl flex items-center gap-3 border-b-4 border-amber-400 mb-6">
+                                <img :src="collegeLogo" class="w-10 h-10 bg-white rounded-full p-0.5 object-contain">
+                                <div class="text-xs font-black leading-tight" x-text="collegeName.toUpperCase()"></div>
+                            </div>
+                            <div class="flex justify-center my-6">
+                                <img :src="currentStudentPhoto" class="w-32 h-32 rounded-full object-cover border-4 border-sky-500 shadow-md bg-white">
+                            </div>
+                            <h2 class="text-center text-2xl font-black text-slate-900 mb-1" x-text="currentStudent.name"></h2>
+                            <p class="text-center font-bold text-slate-700 text-xs mb-1" x-text="'ROLL NO : ' + currentStudent.roll_no"></p>
+                            <p class="text-center font-bold text-slate-600 text-xs mb-4" x-text="'REG NO : ' + currentStudent.reg_no"></p>
+                            <div class="bg-emerald-700 text-white text-center font-black py-1.5 rounded-lg text-xs mb-4" x-text="courseName + ' - ' + sectionName"></div>
                         </div>
-                        <div class="flex justify-center my-3">
-                            <img :src="currentStudentPhoto" class="w-24 h-24 rounded-full object-cover border-4 border-sky-500 shadow-md bg-white">
-                        </div>
-                        <h2 class="text-center text-xl font-black text-slate-900" x-text="currentStudent.name"></h2>
-                        <p class="text-center font-bold text-slate-700 text-xs" x-text="'ROLL NO : ' + currentStudent.roll_no"></p>
-                        <p class="text-center font-bold text-slate-600 text-xs mb-3" x-text="'REG NO : ' + currentStudent.reg_no"></p>
-                        <div class="bg-emerald-700 text-white text-center font-black py-1 rounded-lg text-xs mb-2" x-text="courseName + ' - ' + sectionName"></div>
-                        <div class="text-[11px] space-y-1 font-semibold text-slate-800 border-t border-sky-400 border-dashed pt-2">
+                        <div class="text-[11px] space-y-2 font-semibold text-slate-800 border-t border-sky-400 border-dashed pt-4 mt-2">
                             <p><b>Email:</b> <span x-text="currentStudentDetails.email"></span></p>
                             <p><b>Contact:</b> <span x-text="currentStudentDetails.contact"></span></p>
                             <p><b>Guardian:</b> <span x-text="currentStudentDetails.parent_name + ' (' + currentStudentDetails.parent_contact + ')'"></span></p>
@@ -1407,8 +1410,8 @@ def home():
 
                     <div class="space-y-6">
                         <div class="grid grid-cols-2 gap-4">
-                            <button @click="markStatusBtn('Present')" :disabled="isProcessing" class="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
-                            <button @click="markStatusBtn('Absent')" :disabled="isProcessing" class="bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
+                            <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
+                            <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
                         </div>
                         <div>
                             <label class="block text-white font-bold text-sm mb-1">🔍 Search Student by Reg No:</label>
@@ -1577,6 +1580,12 @@ def home():
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register Students (Excel/CSV)</h3>
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
                         <button @click="importStudentsOnly" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Add Students</button>
+                        <div x-show="skippedImports && skippedImports.length > 0" class="mt-4 bg-red-900/40 border border-red-500/50 p-4 rounded-xl text-xs" style="display: none;">
+                            <h4 class="text-red-400 font-bold mb-2">⚠️ Skipped (Already in another class):</h4>
+                            <ul class="list-disc pl-4 text-slate-300 max-h-32 overflow-y-auto custom-scrollbar">
+                                <template x-for="reg in skippedImports"><li x-text="reg"></li></template>
+                            </ul>
+                        </div>
                     </div>
                     <div class="glass-card p-6 rounded-2xl">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
@@ -1842,10 +1851,10 @@ def home():
 
                 months: mList,
                 years: yList,
-                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA',
+                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)',
                 appSubtitle: 'ATTENDANCE MANAGEMENT SYSTEM',
                 courseName: 'BCA',
-                sectionName: 'Semester 3A',
+                sectionName: 'Semester 1',
                 collegeLogo: 'https://i.ibb.co/3s68K1v/tree-logo.png',
 
                 totalStudents: 0,
@@ -1893,6 +1902,7 @@ def home():
                 studentDashData: null,
                 tableSearchQuery: '',
                 reportSearchQuery: '',
+                skippedImports: [],
 
                 openLeaveModal: false,
                 leaveForm: { leave_type: '🏥 Sick / Medical Leave', subject: 'All Subjects', from_date: curDate, to_date: curDate, reason: '' },
@@ -1940,6 +1950,7 @@ def home():
                             this.userId = this.authForm.username;
                             this.loggedIn = true;
                             this.authError = '';
+                            if (!this.isLogin) alert("Account created successfully!");
                             await this.loadData();
                             await this.loadFacultyLeaves();
                         } else {
@@ -2149,8 +2160,6 @@ def home():
                     this.currentStudentPhoto = data.photo_data;
                 },
                 async markStatusBtn(status) {
-                    if (this.isProcessing) return;
-                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', this.currentStudent.id);
@@ -2167,12 +2176,11 @@ def home():
                             }
                             await this.loadData();
                         } else {
-                            alert("Error saving attendance");
+                            let data = await res.json();
+                            alert("Error saving attendance: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
-                    } finally {
-                        this.isProcessing = false;
                     }
                 },
                 searchByReg() {
@@ -2252,6 +2260,8 @@ def home():
                         if (res.ok) {
                             alert(data.message);
                             await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2272,6 +2282,7 @@ def home():
                         let data = await res.json();
                         if (res.ok) {
                             alert(data.message);
+                            this.skippedImports = data.skipped || [];
                             await this.loadData();
                         } else {
                             alert("Error: " + data.detail);
@@ -2318,9 +2329,12 @@ def home():
                     if (this.resetScope === 'date') formData.append('date_str', this.resetDate);
                     try {
                         let res = await fetch('/api/reset_attendance', { method: 'POST', body: formData });
+                        let data = await res.json();
                         if (res.ok) {
                             alert(data.message);
                             await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2336,9 +2350,13 @@ def home():
                     formData.append('subject_name', this.newSubject);
                     try {
                         let res = await fetch('/api/add_subject', { method: 'POST', body: formData });
+                        let data = await res.json();
                         if (res.ok) {
+                            alert(data.message);
                             this.newSubject = '';
                             await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2354,9 +2372,13 @@ def home():
                     formData.append('subject_name', this.delSubject);
                     try {
                         let res = await fetch('/api/delete_subject', { method: 'POST', body: formData });
+                        let data = await res.json();
                         if (res.ok) {
+                            alert(data.message);
                             this.delSubject = '';
                             await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2366,7 +2388,7 @@ def home():
                 },
                 async uploadLogo() {
                     let fileInput = document.getElementById('logoFile');
-                    if (fileInput.files.length === 0) return;
+                    if (fileInput.files.length === 0) { alert('Select a file.'); return; }
                     if (this.isProcessing) return;
                     this.isProcessing = true;
                     let formData = new FormData();
@@ -2378,6 +2400,8 @@ def home():
                         if (res.ok) {
                             this.collegeLogo = data.logo_url;
                             alert(data.message);
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2400,6 +2424,8 @@ def home():
                         if (res.ok) {
                             alert(data.message);
                             await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
@@ -2422,9 +2448,12 @@ def home():
                     if (photoInput.files.length > 0) formData.append('file', photoInput.files[0]);
                     try {
                         let res = await fetch('/api/save_student_profile', { method: 'POST', body: formData });
+                        let data = await res.json();
                         if (res.ok) {
-                            alert("Profile Saved!");
+                            alert(data.message);
                             await this.fetchStudentDetails();
+                        } else {
+                            alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");

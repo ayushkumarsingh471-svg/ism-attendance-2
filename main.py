@@ -87,7 +87,8 @@ def init_tenant_db(user_id):
             reason TEXT,
             status TEXT DEFAULT 'Pending',
             faculty_remark TEXT DEFAULT '',
-            created_at TEXT DEFAULT ''
+            created_at TEXT DEFAULT '',
+            document_data TEXT DEFAULT ''
         )'''))
 
         try:
@@ -99,6 +100,7 @@ def init_tenant_db(user_id):
             conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS subject TEXT'))
             conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS faculty_remark TEXT DEFAULT \'\''))
             conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT \'\''))
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS document_data TEXT DEFAULT \'\''))
         except Exception:
             pass
 
@@ -205,7 +207,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         leaves = []
         try:
             leave_rows = conn.execute(text(f"""
-                SELECT id, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at
+                SELECT id, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at, document_data
                 FROM {t_leaves}
                 WHERE LOWER(reg_no) = LOWER(:r)
                 ORDER BY id DESC
@@ -213,7 +215,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
             leaves = [{
                 "id": r[0], "leave_type": r[1], "subject": r[2], "from_date": r[3],
-                "to_date": r[4], "reason": r[5], "status": r[6], "faculty_remark": r[7] or '', "created_at": r[8] or ''
+                "to_date": r[4], "reason": r[5], "status": r[6], "faculty_remark": r[7] or '', "created_at": r[8] or '', "document_data": r[9] or ''
             } for r in leave_rows]
         except Exception:
             leaves = []
@@ -248,7 +250,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 # ==========================================
 
 @app.post("/api/apply_leave")
-def apply_leave(
+async def apply_leave(
     faculty_id: str = Form(...),
     reg_no: str = Form(...),
     student_name: str = Form(...),
@@ -256,17 +258,25 @@ def apply_leave(
     subject: str = Form(...),
     from_date: str = Form(...),
     to_date: str = Form(...),
-    reason: str = Form(...)
+    reason: str = Form(...),
+    file: UploadFile = File(None)
 ):
     try:
+        encoded_doc = ""
+        if file and file.filename:
+            contents = await file.read()
+            ext = file.filename.split('.')[-1].lower()
+            mime_type = file.content_type or f"image/{ext}"
+            encoded_doc = f"data:{mime_type};base64,{base64.b64encode(contents).decode('utf-8')}"
+
         init_tenant_db(faculty_id)
         safe_uid = get_safe_prefix(faculty_id)
         t_leaves = f"{safe_uid}_leaves"
         c_time = datetime.now().strftime("%Y-%m-%d %H:%M")
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, created_at)
-                VALUES (:r, :sn, :lt, :sub, :fd, :td, :re, 'Pending', :ca)
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, created_at, document_data)
+                VALUES (:r, :sn, :lt, :sub, :fd, :td, :re, 'Pending', :ca, :doc)
             """), {
                 "r": reg_no.strip(),
                 "sn": student_name.strip(),
@@ -275,7 +285,8 @@ def apply_leave(
                 "fd": from_date.strip(),
                 "td": to_date.strip(),
                 "re": reason.strip(),
-                "ca": c_time
+                "ca": c_time,
+                "doc": encoded_doc
             })
         return {"success": True, "message": "Leave application sent to your faculty successfully!"}
     except Exception as e:
@@ -288,7 +299,7 @@ def get_faculty_leaves(user_id: str):
     t_leaves = f"{safe_uid}_leaves"
     with engine.begin() as conn:
         rows = conn.execute(text(f"""
-            SELECT id, reg_no, student_name, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at
+            SELECT id, reg_no, student_name, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at, document_data
             FROM {t_leaves}
             ORDER BY id DESC
         """)).fetchall()
@@ -296,7 +307,7 @@ def get_faculty_leaves(user_id: str):
         leaves = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3],
             "subject": r[4], "from_date": r[5], "to_date": r[6], "reason": r[7],
-            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10] or ''
+            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10] or '', "document_data": r[11] or ''
         } for r in rows]
         return {"leaves": leaves}
 
@@ -1814,13 +1825,18 @@ def home():
                 <div class="flex justify-between items-center mb-6">
                     <div>
                         <h2 class="text-2xl font-black text-white">✉️ Student Leave Applications Inbox</h2>
-                        <p class="text-xs text-slate-300 mt-1">Review student applications and reply with approval/rejection remarks.</p>
+                        <p class="text-xs text-slate-300 mt-1">Review student applications, view documents and reply with approval/rejection remarks.</p>
                     </div>
                     <button @click="loadFacultyLeaves()" :disabled="isProcessing" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
                 </div>
+                
+                <!-- NEW SEARCH BAR FOR LEAVES -->
+                <div class="mb-6">
+                    <input type="text" x-model="leaveSearchQuery" placeholder="🔍 Search applications by Student Name or Reg No..." class="w-full p-3 rounded-xl shadow border-2 border-indigo-400/30 bg-slate-900 text-white font-bold text-sm focus:border-indigo-500">
+                </div>
 
                 <div class="space-y-4">
-                    <template x-for="leave in facultyLeaves">
+                    <template x-for="leave in filteredFacultyLeaves">
                         <div class="glass-card p-6 rounded-2xl border-l-8" :class="leave.status === 'Approved' ? 'border-emerald-500' : (leave.status === 'Rejected' ? 'border-red-500' : 'border-amber-500')">
                             <div class="flex justify-between items-start mb-2">
                                 <div>
@@ -1833,6 +1849,14 @@ def home():
                                       x-text="leave.status"></span>
                             </div>
                             <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-700 text-slate-200 text-xs mb-3 whitespace-pre-wrap" x-text="leave.reason"></div>
+                            
+                            <!-- ATTACHMENT VIEW BUTTON -->
+                            <div x-show="leave.document_data" class="mb-3">
+                                <a :href="leave.document_data" download="Leave_Attachment" class="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-sky-400 text-[11px] font-bold py-1.5 px-3 rounded-lg border border-slate-600 transition shadow">
+                                    📎 View / Download Attached Document
+                                </a>
+                            </div>
+
                             <div x-show="leave.faculty_remark" class="bg-indigo-950/60 p-2.5 rounded-xl border border-indigo-500/40 text-xs text-indigo-200 mb-3">
                                 <b>Your Previous Remark:</b> <span x-text="leave.faculty_remark"></span>
                             </div>
@@ -1843,8 +1867,8 @@ def home():
                             </div>
                         </div>
                     </template>
-                    <div x-show="facultyLeaves.length === 0" class="glass-card p-12 text-center rounded-2xl text-slate-400 font-bold">
-                        📭 No leave applications received yet.
+                    <div x-show="filteredFacultyLeaves.length === 0" class="glass-card p-12 text-center rounded-2xl text-slate-400 font-bold">
+                        📭 No matching leave applications found.
                     </div>
                 </div>
             </div>
@@ -2063,6 +2087,11 @@ def home():
                                 </div>
                                 <p class="text-slate-400 mb-1"><b>Duration:</b> <span class="text-slate-200" x-text="l.from_date + ' to ' + l.to_date"></span></p>
                                 <p class="text-slate-300 italic mb-2" x-text="'\"' + l.reason + '\"'"></p>
+                                
+                                <div x-show="l.document_data" class="mt-2 mb-3">
+                                    <a :href="l.document_data" download="Leave_Document" class="text-[10px] text-sky-400 hover:text-sky-300 underline font-bold">📎 View Attached Document</a>
+                                </div>
+
                                 <div x-show="l.faculty_remark" class="bg-slate-950 p-2.5 rounded-xl border border-sky-500/30 text-sky-300">
                                     <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
                                 </div>
@@ -2109,6 +2138,10 @@ def home():
                     <div>
                         <label class="block text-sky-400 font-bold text-xs mb-1">Reason / Statement</label>
                         <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Sir/Madam, I am applying for leave..." required class="w-full p-3 rounded-xl text-xs font-normal"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sky-400 font-bold text-xs mb-1">Attach Medical/Event Document (Optional)</label>
+                        <input type="file" id="leaveAttachmentFile" class="w-full p-2 rounded-xl text-xs bg-slate-800 text-white border border-sky-400/50">
                     </div>
                     <div class="flex justify-end gap-3 pt-2">
                         <button type="button" @click="openLeaveModal = false" class="px-5 py-2.5 rounded-xl text-slate-400 text-xs font-bold">Cancel</button>
@@ -2207,6 +2240,7 @@ def home():
                 leaveForm: { leave_type: '🏥 Sick / Medical Leave', subject: 'All Subjects', from_date: curDate, to_date: curDate, reason: '' },
                 facultyLeaves: [],
                 leaveRemarkInput: {},
+                leaveSearchQuery: '',
 
                 init() { this.syncFromDate(); },
                 syncFromDate() {
@@ -2233,6 +2267,14 @@ def home():
                 },
                 get pendingLeavesCount() {
                     return this.facultyLeaves.filter(l => l.status === 'Pending').length;
+                },
+                get filteredFacultyLeaves() {
+                    if (this.leaveSearchQuery.trim() === '') return this.facultyLeaves;
+                    let q = this.leaveSearchQuery.toLowerCase();
+                    return this.facultyLeaves.filter(l => 
+                        (l.student_name && l.student_name.toLowerCase().includes(q)) || 
+                        (l.reg_no && l.reg_no.toLowerCase().includes(q))
+                    );
                 },
                 async submitAuth() {
                     if (this.isProcessing) return;
@@ -2312,6 +2354,11 @@ def home():
                     formData.append('to_date', this.leaveForm.to_date);
                     formData.append('reason', this.leaveForm.reason);
 
+                    let fileInput = document.getElementById('leaveAttachmentFile');
+                    if (fileInput && fileInput.files.length > 0) {
+                        formData.append('file', fileInput.files[0]);
+                    }
+
                     try {
                         let res = await fetch('/api/apply_leave', { method: 'POST', body: formData });
                         let data = await res.json();
@@ -2319,6 +2366,7 @@ def home():
                             alert(data.message);
                             this.openLeaveModal = false;
                             this.leaveForm.reason = '';
+                            if (fileInput) fileInput.value = '';
                             await this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
                         } else {
                             alert("Failed: " + data.detail);
@@ -2827,6 +2875,7 @@ def home():
                     this.studentDashData = null;
                     this.facultyLeaves = [];
                     this.skippedImports = [];
+                    this.leaveSearchQuery = '';
                 }
             }
         }

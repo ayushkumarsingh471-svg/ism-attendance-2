@@ -11,6 +11,12 @@ from sqlalchemy import create_engine, text
 
 app = FastAPI(title="ISM Attendance ERP - High Performance Full Edition")
 
+# --- Vercel Serverless Entrypoint Aliases ---
+# Ye Vercel ko batata hai ki app ko kahan se run karna hai
+handler = app
+application = app
+# --------------------------------------------
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     try:
@@ -1377,7 +1383,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB 3: ATTENDANCE TABLE -->
+            <!-- TAB 3: ATTENDANCE TABLE (FAST INLINE EDITOR) -->
             <div x-show="currentTab === 'table'">
                 <h2 class="text-2xl font-black text-white mb-4">📅 Monthly Register & Inline Editor</h2>
 
@@ -1729,7 +1735,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- STUDENT PORTAL                                                 -->
+    <!-- STUDENT PORTAL (LEAVES PLACED UNDER DAILY ATTENDANCE)          -->
     <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'student'" class="min-h-screen relative z-10 p-4 md:p-8" style="display: none;">
         <div class="max-w-5xl mx-auto glass-card p-6 rounded-3xl shadow-2xl mb-8 flex flex-col sm:flex-row justify-between items-center gap-4 border-t-4 border-emerald-500">
@@ -1749,6 +1755,7 @@ def home():
         </div>
 
         <div class="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8" x-show="studentDashData">
+            <!-- Left Profile Card -->
             <div class="col-span-1 space-y-6">
                 <div class="bg-slate-900 border-2 border-emerald-500/30 p-6 rounded-3xl shadow-2xl text-center">
                     <div class="text-6xl mb-4">🎓</div>
@@ -1777,6 +1784,7 @@ def home():
                 </div>
             </div>
 
+            <!-- Right Details Area -->
             <div class="col-span-1 md:col-span-2 space-y-8">
                 <!-- Subject Wise Compile Report -->
                 <div class="glass-card p-6 rounded-3xl">

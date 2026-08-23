@@ -1,14 +1,8 @@
 {
-  "builds": [
+  "rewrites": [
     {
-      "src": "ism_att.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "ism_att.py"
+      "source": "/(.*)",
+      "destination": "/ism_att.py"
     }
   ]
 }

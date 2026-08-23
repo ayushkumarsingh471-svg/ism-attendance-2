@@ -89,8 +89,17 @@ def init_tenant_db(user_id):
             faculty_remark TEXT DEFAULT '',
             created_at TEXT DEFAULT ''
         )'''))
+        
+        # Schema Migrations for existing tables
         try:
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
+        except Exception:
+            pass
+
+        try:
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS subject TEXT'))
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS faculty_remark TEXT DEFAULT \'\''))
+            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT \'\''))
         except Exception:
             pass
 
@@ -197,7 +206,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         leaves = []
         try:
             leave_rows = conn.execute(text(f"""
-                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, created_at
+                SELECT id, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at
                 FROM {t_leaves}
                 WHERE LOWER(reg_no) = LOWER(:r)
                 ORDER BY id DESC
@@ -217,6 +226,12 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             except Exception:
                 return def_v
 
+        college_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
+        subtitle = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
+        course = get_cfg('course_name', 'BCA')
+        sec = get_cfg('section_name', 'Semester 1')
+        college_logo = get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
+
         return {
             "student": {"name": st_name, "reg_no": reg_no, "roll_no": st_roll},
             "faculty_id": faculty_id,
@@ -224,9 +239,9 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             "summary": summary,
             "history": history,
             "leaves": leaves,
-            "college_name": get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)'),
-            "course": get_cfg('course_name', 'BCA') + " - " + get_cfg('section_name', 'Semester 1'),
-            "logo": get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
+            "college_name": college_name,
+            "course": f"{subtitle} | {course} | {sec}",
+            "logo": college_logo
         }
 
 # ==========================================
@@ -274,7 +289,7 @@ def get_faculty_leaves(user_id: str):
     t_leaves = f"{safe_uid}_leaves"
     with engine.begin() as conn:
         rows = conn.execute(text(f"""
-            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, status, faculty_remark, created_at
+            SELECT id, reg_no, student_name, leave_type, COALESCE(subject, 'All Subjects'), from_date, to_date, reason, status, faculty_remark, created_at
             FROM {t_leaves}
             ORDER BY id DESC
         """)).fetchall()
@@ -367,10 +382,10 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
             return res[0] if res and res[0] else def_v
 
-        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)')
+        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
         c_sub = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
         c_course = get_cfg('course_name', 'BCA')
-        c_sec = get_cfg('section_name', 'Semester 1')
+        c_sec = get_cfg('section_name', 'Semester 3A')
         logo_url = get_cfg('college_logo', 'https://i.ibb.co/3s68K1v/tree-logo.png')
 
     return {
@@ -666,7 +681,7 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
-        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
+        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT PATNA"
 
         headers = ["Roll No", "Reg No", "Name"] + subjects + ["Overall %"]
         table_data = [headers]
@@ -1625,7 +1640,7 @@ def home():
                             </form>
                             <form @submit.prevent="deleteSubject" class="space-y-3">
                                 <select x-model="delSubject" class="w-full p-3 rounded-xl"><option value="">--- Select Subject ---</option><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
-                                <button type="submit" :disabled="isProcessing" class="w-full bg-red-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Delete Subject</button>
+                                <button type="submit" :disabled="isProcessing" class="w-full bg-red-500 text-white font-black py-2.5 rounded-xl shadow">Delete Subject</button>
                             </form>
                         </div>
                         <div class="glass-card p-6 rounded-2xl">
@@ -1696,7 +1711,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- 2. DATE-WISE ATTENDANCE LOG (NOW PLACED ABOVE LEAVE SECTION) -->
+                <!-- 2. DATE-WISE ATTENDANCE LOG (ABOVE LEAVES) -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Date-wise Attendance Register (P/A Status)</h3>
                     <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
@@ -1728,7 +1743,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- 3. MY SUBMITTED LEAVE APPLICATIONS (PLACED AT THE BOTTOM) -->
+                <!-- 3. MY SUBMITTED LEAVE APPLICATIONS (AT BOTTOM) -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-sky-400 mb-4">✉️ My Submitted Leave Applications</h3>
                     <div class="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
@@ -1827,10 +1842,10 @@ def home():
 
                 months: mList,
                 years: yList,
-                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)',
+                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA',
                 appSubtitle: 'ATTENDANCE MANAGEMENT SYSTEM',
                 courseName: 'BCA',
-                sectionName: 'Semester 1',
+                sectionName: 'Semester 3A',
                 collegeLogo: 'https://i.ibb.co/3s68K1v/tree-logo.png',
 
                 totalStudents: 0,
@@ -2303,7 +2318,6 @@ def home():
                     if (this.resetScope === 'date') formData.append('date_str', this.resetDate);
                     try {
                         let res = await fetch('/api/reset_attendance', { method: 'POST', body: formData });
-                        let data = await res.json();
                         if (res.ok) {
                             alert(data.message);
                             await this.loadData();

@@ -11,12 +11,6 @@ from sqlalchemy import create_engine, text
 
 app = FastAPI(title="ISM Attendance ERP - High Performance Full Edition")
 
-# --- Vercel Serverless Entrypoint Aliases ---
-# Ye Vercel ko batata hai ki app ko kahan se run karna hai
-handler = app
-application = app
-# --------------------------------------------
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     try:
@@ -88,16 +82,13 @@ def init_tenant_db(user_id):
             from_date TEXT,
             to_date TEXT,
             reason TEXT,
-            doc_data TEXT,
-            doc_name TEXT,
             status TEXT DEFAULT 'Pending',
             faculty_remark TEXT DEFAULT '',
             created_at TEXT
         )'''))
 
+        # Performance Indexes for zero-lag aggregation
         try:
-            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS doc_data TEXT'))
-            conn.execute(text(f'ALTER TABLE {t_leaves} ADD COLUMN IF NOT EXISTS doc_name TEXT'))
             conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_perf ON {t_attendance} (subject_id, date, status, student_id)'))
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
         except Exception:
@@ -173,9 +164,11 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         sub_rows = conn.execute(text(f"SELECT id, subject_name FROM {t_subjects} ORDER BY subject_name")).fetchall()
         sub_map = {r[1]: r[0] for r in sub_rows}
 
+        # Optimized single query for total classes
         tot_c_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} GROUP BY subject_id")).fetchall()
         sub_total_classes = {r[0]: r[1] for r in tot_c_rows}
 
+        # Optimized single query for student presents
         att_rows = conn.execute(text(f"SELECT subject_id, COUNT(*) FROM {t_attendance} WHERE student_id=:sid AND status='Present' GROUP BY subject_id"), {"sid": st_id}).fetchall()
         present_map = {r[0]: r[1] for r in att_rows}
 
@@ -204,13 +197,12 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         try:
             leave_records = conn.execute(text(f"""
-                SELECT id, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at, doc_data, doc_name 
+                SELECT id, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at 
                 FROM {t_leaves} WHERE reg_no = :r ORDER BY id DESC
             """), {"r": reg_no}).fetchall()
             leaves = [{
                 "id": lr[0], "leave_type": lr[1], "subject": lr[2], "from_date": lr[3], 
-                "to_date": lr[4], "reason": lr[5], "status": lr[6], "faculty_remark": lr[7] or '', 
-                "created_at": lr[8], "doc_data": lr[9] or '', "doc_name": lr[10] or ''
+                "to_date": lr[4], "reason": lr[5], "status": lr[6], "faculty_remark": lr[7] or '', "created_at": lr[8]
             } for lr in leave_records]
         except Exception:
             leaves = []
@@ -232,11 +224,11 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         }
 
 # ==========================================
-# LEAVE MANAGEMENT APIS (WITH PDF ATTACHMENT)
+# LEAVE MANAGEMENT APIS
 # ==========================================
 
 @app.post("/api/apply_leave")
-async def apply_leave(
+def apply_leave(
     faculty_id: str = Form(...),
     reg_no: str = Form(...),
     student_name: str = Form(...),
@@ -244,33 +236,22 @@ async def apply_leave(
     subject_name: str = Form(...),
     from_date: str = Form(...),
     to_date: str = Form(...),
-    reason: str = Form(...),
-    doc_file: UploadFile = File(None)
+    reason: str = Form(...)
 ):
     try:
         safe_uid = get_safe_prefix(faculty_id)
         t_leaves = f"{safe_uid}_leaves"
         c_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-        
-        doc_data = None
-        doc_name = None
-        if doc_file and doc_file.filename:
-            doc_name = doc_file.filename
-            contents = await doc_file.read()
-            ext = doc_name.split('.')[-1].lower()
-            mime = "application/pdf" if ext == "pdf" else f"image/{ext}"
-            doc_data = f"data:{mime};base64,{base64.b64encode(contents).decode('utf-8')}"
-
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, doc_data, doc_name, status, created_at)
-                VALUES (:r, :n, :lt, :sub, :fd, :td, :re, :dd, :dn, 'Pending', :ca)
+                INSERT INTO {t_leaves} (reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, created_at)
+                VALUES (:r, :n, :lt, :sub, :fd, :td, :re, 'Pending', :ca)
             """), {
                 "r": reg_no.strip(), "n": student_name.strip(), "lt": leave_type.strip(),
                 "sub": subject_name.strip(), "fd": from_date.strip(), "td": to_date.strip(),
-                "re": reason.strip(), "dd": doc_data, "dn": doc_name, "ca": c_time
+                "re": reason.strip(), "ca": c_time
             })
-        return {"success": True, "message": "Leave application & document sent successfully to your Faculty portal!"}
+        return {"success": True, "message": "Leave application sent successfully to your Faculty portal!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
@@ -290,20 +271,17 @@ def get_leaves(user_id: str):
                     from_date TEXT,
                     to_date TEXT,
                     reason TEXT,
-                    doc_data TEXT,
-                    doc_name TEXT,
                     status TEXT DEFAULT 'Pending',
                     faculty_remark TEXT DEFAULT '',
                     created_at TEXT
                 )
             """))
-            rows = conn.execute(text(f"SELECT id, reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at, doc_data, doc_name FROM {t_leaves} ORDER BY id DESC")).fetchall()
+            rows = conn.execute(text(f"SELECT id, reg_no, student_name, leave_type, subject_name, from_date, to_date, reason, status, faculty_remark, created_at FROM {t_leaves} ORDER BY id DESC")).fetchall()
         
         leaves_list = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3],
             "subject_name": r[4], "from_date": r[5], "to_date": r[6], "reason": r[7],
-            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10],
-            "doc_data": r[11] or '', "doc_name": r[12] or ''
+            "status": r[8], "faculty_remark": r[9] or '', "created_at": r[10]
         } for r in rows]
         return {"leaves": leaves_list}
     except Exception as e:
@@ -353,6 +331,7 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
             present_today = conn.execute(text(f"SELECT COUNT(date) FROM {t_attendance} WHERE subject_id=:sid AND date=:dt AND status='Present'"), {"sid": sub_id, "dt": target_date}).fetchone()[0] or 0
             
+            # Fast Group-By single query for all students attendance count
             p_rows = conn.execute(text(f"""
                 SELECT student_id, COUNT(*) FROM {t_attendance} 
                 WHERE subject_id=:sid AND date LIKE :d AND status='Present' 
@@ -364,6 +343,7 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         students = sort_students_safely(students_raw)
         st_list = [{"id": s[0], "reg_no": s[1], "roll_no": s[2], "name": s[3]} for s in students]
 
+        # Fast Defaulters List computation
         defaulters = []
         for s in students:
             s_id, reg, roll, name = s
@@ -519,9 +499,11 @@ def get_compile_report(user_id: str, month: str = "July", year: int = 2026):
         sub_map = {s[1]: s[0] for s in sub_rows}
         subjects = list(sub_map.keys())
 
+        # Single Query Fast Count for Conducted Classes
         tc_rows = conn.execute(text(f"SELECT subject_id, COUNT(DISTINCT date) FROM {t_attendance} WHERE date LIKE :d GROUP BY subject_id"), {"d": date_pattern}).fetchall()
         sub_total_classes = {r[0]: r[1] for r in tc_rows}
 
+        # Single Query Fast Attendance Map
         att_rows = conn.execute(text(f"""
             SELECT student_id, subject_id, COUNT(*) FROM {t_attendance} 
             WHERE status='Present' AND date LIKE :d 
@@ -1119,11 +1101,13 @@ def home():
     <!-- MAIN LOGIN SCREEN -->
     <div x-show="!loggedIn" class="flex items-center justify-center min-h-screen p-6 relative z-10">
         <div class="glass-card p-10 rounded-3xl shadow-2xl w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
+
+            <!-- Left Branding Side -->
             <div>
                 <div class="inline-block bg-sky-950/80 border border-sky-400/40 px-3 py-1 rounded-full text-xs font-bold text-sky-400 mb-4 shadow">⚡ ENTERPRISE CLOUD PORTAL</div>
                 <h1 class="text-4xl font-black text-white mb-2">🎓 ISM PATNA</h1>
                 <h3 class="text-lg font-bold text-amber-400 mb-4">ATTENDANCE ERP SYSTEM</h3>
-                <p class="text-slate-300 text-sm leading-relaxed mb-6">High-speed real-time portal for instantaneous attendance calculation, defaulters tracking, and student leave management with document attachments.</p>
+                <p class="text-slate-300 text-sm leading-relaxed mb-6">High-speed real-time portal for instantaneous attendance calculation, defaulters tracking, and student leave management.</p>
 
                 <div class="space-y-4">
                     <div class="bg-sky-950/60 border border-sky-500/40 p-4 rounded-xl flex items-center gap-4">
@@ -1137,12 +1121,13 @@ def home():
                         <div class="text-3xl">🎓</div>
                         <div>
                             <p class="text-emerald-300 font-bold text-sm">Student Portal</p>
-                            <p class="text-slate-400 text-xs">View percentage, daily log, and apply for leaves with PDF / document attachments.</p>
+                            <p class="text-slate-400 text-xs">View percentage, daily log, and apply for leaves with faculty inbox integration.</p>
                         </div>
                     </div>
                 </div>
             </div>
 
+            <!-- Right Login Form Side -->
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
                 <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
                     <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
@@ -1191,7 +1176,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- FACULTY DASHBOARD                                              -->
+    <!-- FACULTY DASHBOARD (ORDER REORGANIZED ACCORDING TO SPECS)       -->
     <!-- ============================================================== -->
     <div x-show="loggedIn && userRole === 'faculty'" class="flex h-screen overflow-hidden relative z-10" style="display: none;">
         <div class="w-72 bg-gradient-to-b from-blue-950 via-slate-950 to-slate-950 border-r-2 border-sky-400/50 flex flex-col justify-between p-4 shadow-2xl relative overflow-hidden">
@@ -1214,7 +1199,7 @@ def home():
                     <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
                     <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
 
-                    <!-- LEAVE REQUESTS POSITIONED DIRECTLY UNDER MANAGE STUDENTS & ABOVE COLLEGE PROFILE -->
+                    <!-- LEAVE REQUESTS PLACED DIRECTLY UNDER MANAGE STUDENTS & ABOVE COLLEGE PROFILE -->
                     <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-950/90'" class="w-full text-left py-2 px-3.5 rounded-xl transition flex items-center justify-between">
                         <span class="flex items-center gap-2">📬 Leave Requests</span>
                         <span x-show="pendingLeavesCount > 0" class="bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full text-xs font-black" x-text="pendingLeavesCount"></span>
@@ -1270,6 +1255,7 @@ def home():
                     </div>
                 </div>
 
+                <!-- STAT CARDS -->
                 <div class="grid grid-cols-4 gap-6">
                     <div class="bg-white text-slate-900 p-6 rounded-2xl shadow-xl text-center border-t-8 border-blue-500">
                         <p class="font-bold text-slate-600">Total Students</p>
@@ -1289,7 +1275,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- DEFAULTERS LIST BANNER -->
+                <!-- DEFAULTERS LIST BANNER (DIRECTLY UNDER THE 4 METRICS) -->
                 <div class="mt-6 bg-gradient-to-r from-red-950 via-slate-900 to-red-950 p-6 rounded-3xl border-2 border-red-500 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-6">
                     <div class="flex items-center gap-4">
                         <div class="text-5xl animate-pulse">🚨</div>
@@ -1616,7 +1602,7 @@ def home():
                 </div>
             </div>
 
-            <!-- TAB: LEAVE REQUESTS (FACULTY INBOX WITH DOCUMENT DOWNLOAD) -->
+            <!-- TAB: LEAVE REQUESTS (FACULTY INBOX) -->
             <div x-show="currentTab === 'leaves'">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-2xl font-black text-white flex items-center gap-2">📬 Student Leave Applications & Inquiries</h2>
@@ -1648,19 +1634,11 @@ def home():
                             <div class="py-4 text-sm text-slate-200 bg-slate-950/60 p-4 rounded-2xl my-3 border border-slate-800">
                                 <p class="text-xs font-bold text-sky-400 mb-1">Student Application Content / Reason:</p>
                                 <p class="whitespace-pre-line leading-relaxed font-sans" x-text="lv.reason"></p>
-                                
-                                <!-- Attachment Link in Faculty View -->
-                                <div x-show="lv.doc_data" class="mt-3 pt-3 border-t border-slate-800 flex items-center gap-3">
-                                    <span class="text-xs font-bold text-emerald-400">📎 Attached File:</span>
-                                    <a :href="lv.doc_data" :download="lv.doc_name || 'Medical_Doc.pdf'" target="_blank" class="bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs py-1.5 px-3 rounded-lg shadow flex items-center gap-1">
-                                        <span>📥 View / Download Document (<span x-text="lv.doc_name"></span>)</span>
-                                    </a>
-                                </div>
                             </div>
 
                             <div class="pt-2 flex flex-col md:flex-row gap-4 items-center justify-between">
                                 <div class="w-full md:w-2/3">
-                                    <input type="text" x-model="lv.tempRemark" placeholder="Type message/remark for student (e.g., 'Approved for 2 days. Medical report accepted.')..." class="w-full p-2.5 rounded-xl text-xs">
+                                    <input type="text" x-model="lv.tempRemark" placeholder="Type message/remark for student (e.g., 'Approved for 2 days. Submit doctor note.')..." class="w-full p-2.5 rounded-xl text-xs">
                                     <p x-show="lv.faculty_remark" class="text-[11px] text-amber-300 font-semibold mt-1" x-text="'Current Saved Note: ' + lv.faculty_remark"></p>
                                 </div>
                                 <div class="flex gap-2 w-full md:w-auto">
@@ -1779,7 +1757,7 @@ def home():
 
                 <div class="bg-gradient-to-br from-indigo-950 to-slate-900 border border-indigo-500/40 p-5 rounded-3xl shadow-xl text-center">
                     <h4 class="font-black text-indigo-300 text-sm mb-1">Need Leave or Absence Permission?</h4>
-                    <p class="text-xs text-slate-400 mb-4">Draft and email official leave directly to your teacher's ERP portal with attached medical reports.</p>
+                    <p class="text-xs text-slate-400 mb-4">Draft and email official leave directly to your teacher's ERP portal.</p>
                     <button @click="showLeaveModal = true" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-2.5 rounded-xl text-xs shadow transition">✉️ COMPOSE LEAVE EMAIL</button>
                 </div>
             </div>
@@ -1856,10 +1834,6 @@ def home():
                                           x-text="l.status"></span>
                                 </div>
                                 <p class="text-slate-300 mt-2 font-medium" x-text="l.reason"></p>
-                                <div x-show="l.doc_data" class="mt-2 flex items-center gap-2">
-                                    <span class="text-slate-400">Attached File:</span>
-                                    <a :href="l.doc_data" :download="l.doc_name || 'My_Document.pdf'" target="_blank" class="text-emerald-400 font-bold underline hover:text-emerald-300" x-text="'📎 ' + l.doc_name"></a>
-                                </div>
                                 <div x-show="l.faculty_remark" class="mt-2 bg-slate-950 p-2.5 rounded-xl border border-amber-500/30 text-amber-300">
                                     <b>Faculty Remark:</b> <span x-text="l.faculty_remark"></span>
                                 </div>
@@ -1935,7 +1909,7 @@ def home():
 
 
     <!-- ============================================================== -->
-    <!-- MODAL 2: STUDENT EMAIL / LEAVE COMPOSER (WITH PDF ATTACHMENT)  -->
+    <!-- MODAL 2: STUDENT EMAIL / LEAVE COMPOSER MODAL                  -->
     <!-- ============================================================== -->
     <div x-show="showLeaveModal" class="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50" style="display: none;">
         <div class="bg-slate-900 border-2 border-emerald-500 w-full max-w-2xl rounded-3xl p-6 md:p-8 shadow-2xl relative max-h-[95vh] overflow-y-auto custom-scrollbar">
@@ -1945,7 +1919,7 @@ def home():
                     <span class="text-3xl">📧</span>
                     <div>
                         <h3 class="text-xl font-black text-white">Official Leave Application Desk</h3>
-                        <p class="text-emerald-400 text-xs font-bold">Compose & send email directly with attached document / medical report</p>
+                        <p class="text-emerald-400 text-xs font-bold">Compose & send email directly to Faculty Attendance Portal</p>
                     </div>
                 </div>
                 <button @click="showLeaveModal = false" class="text-slate-400 hover:text-white font-black text-2xl px-2">✕</button>
@@ -1987,20 +1961,13 @@ def home():
 
                 <div>
                     <label class="block text-sky-300 font-bold text-xs mb-1">Application Body / Reason Description</label>
-                    <textarea x-model="leaveForm.reason" rows="4" placeholder="Respected Sir/Ma'am, I am writing this to kindly request leave on the aforementioned dates due to..." required class="w-full p-3 rounded-xl text-xs font-normal leading-relaxed"></textarea>
-                </div>
-
-                <!-- PDF/DOCUMENT ATTACHMENT INPUT -->
-                <div>
-                    <label class="block text-emerald-400 font-bold text-xs mb-1">📎 Attach Medical Certificate / Report / Document (PDF or Image)</label>
-                    <input type="file" id="leaveDocFile" accept=".pdf,.png,.jpg,.jpeg" class="w-full p-2.5 rounded-xl text-xs bg-emerald-50 text-slate-900 border-2 border-emerald-400">
-                    <p class="text-[11px] text-slate-400 mt-1">Optional: Attach doctor slip, prescription, or event participation document.</p>
+                    <textarea x-model="leaveForm.reason" rows="5" placeholder="Respected Sir/Ma'am, I am writing this to kindly request leave on the aforementioned dates due to..." required class="w-full p-3 rounded-xl text-xs font-normal leading-relaxed"></textarea>
                 </div>
 
                 <div class="pt-2 flex gap-4">
                     <button type="button" @click="showLeaveModal = false" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-3 rounded-xl text-xs">Cancel</button>
                     <button type="submit" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-xs shadow-lg flex items-center justify-center gap-2">
-                        <span>📤 SEND APPLICATION WITH ATTACHMENT</span>
+                        <span>📤 SEND APPLICATION TO FACULTY</span>
                     </button>
                 </div>
             </form>
@@ -2197,11 +2164,6 @@ def home():
                     formData.append('to_date', this.leaveForm.to_date);
                     formData.append('reason', this.leaveForm.reason);
 
-                    let docFile = document.getElementById('leaveDocFile');
-                    if (docFile && docFile.files.length > 0) {
-                        formData.append('doc_file', docFile.files[0]);
-                    }
-
                     try {
                         let res = await fetch('/api/apply_leave', { method: 'POST', body: formData });
                         let data = await res.json();
@@ -2209,7 +2171,6 @@ def home():
                             alert(data.message);
                             this.showLeaveModal = false;
                             this.leaveForm.reason = '';
-                            if (docFile) docFile.value = '';
                             this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
                         } else {
                             alert("Failed to submit: " + (data.detail || 'Error'));
@@ -2316,6 +2277,7 @@ def home():
 
                     student.days[day] = displayVal;
 
+                    // Optimistic instant re-calculation without waiting for DB
                     let distinctDays = new Set();
                     for (let s of this.tableRows) {
                         for (let d = 1; d <= this.tableNumDays; d++) {

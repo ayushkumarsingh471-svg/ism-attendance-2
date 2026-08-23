@@ -513,7 +513,7 @@ def download_defaulters_pdf(user_id: str, month: str = "July", year: int = 2026,
     elements.append(Paragraph(f"DEFAULTERS REPORT (< 75%) — {subject.upper()} | {month.upper()} {year}", sub_style))
     elements.append(Spacer(1, 10))
 
-    # Fixed larger width for Name to prevent cutoff
+    # Extended width for Name column to avoid text wrapping
     col_widths = [50, 90, 180, 100, 70, 70, 140]
     t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
@@ -2262,8 +2262,13 @@ def home():
                                 this.fetchStudentDetails();
                             }
                             await this.loadData();
+                        } else {
+                            let data = await res.json();
+                            alert("Error saving attendance: " + data.detail);
                         }
-                    } catch(e) {}
+                    } catch(e) {
+                        alert("Network error.");
+                    }
                 },
                 searchByReg() {
                     let idx = this.students.findIndex(s => s.reg_no.toLowerCase().includes(this.searchReg.toLowerCase()));

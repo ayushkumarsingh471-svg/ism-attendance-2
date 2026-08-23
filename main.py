@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Production Edition")
+app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -89,8 +89,7 @@ def init_tenant_db(user_id):
             faculty_remark TEXT DEFAULT '',
             created_at TEXT DEFAULT ''
         )'''))
-        
-        # Schema Migrations for existing tables
+
         try:
             conn.execute(text(f'ALTER TABLE {t_details} ADD COLUMN IF NOT EXISTS photo_data TEXT'))
         except Exception:
@@ -226,7 +225,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             except Exception:
                 return def_v
 
-        college_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
+        college_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)')
         subtitle = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
         course = get_cfg('course_name', 'BCA')
         sec = get_cfg('section_name', 'Semester 1')
@@ -382,7 +381,7 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
             res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
             return res[0] if res and res[0] else def_v
 
-        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA')
+        c_name = get_cfg('college_name', 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)')
         c_sub = get_cfg('app_subtitle', 'ATTENDANCE MANAGEMENT SYSTEM')
         c_course = get_cfg('course_name', 'BCA')
         c_sec = get_cfg('section_name', 'Semester 1')
@@ -471,16 +470,15 @@ def download_defaulters_pdf(user_id: str, month: str = "July", year: int = 2026,
     date_pattern = f"{year}-{month_num:02d}-%"
 
     with engine.begin() as conn:
+        c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
+        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
+
         sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
         sub_id = sub_id_res[0] if sub_id_res else None
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
 
-        c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
-        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT PATNA"
-
-        table_data = [["Roll No", "Reg No", "Student Name", "Subject", "Pres/Tot", "Att %", "Status"]]
-
+        defaulters = []
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
             if tc_count > 0:
@@ -495,34 +493,46 @@ def download_defaulters_pdf(user_id: str, month: str = "July", year: int = 2026,
                     p_cnt = pres_dict.get(s[0], 0)
                     pct = round((p_cnt / tc_count) * 100)
                     if pct < 75:
-                        table_data.append([
-                            str(s[2]), str(s[1]), str(s[3]), subject, f"{p_cnt}/{tc_count}", f"{pct}%", "Shortage (< 75%)"
-                        ])
+                        defaulters.append((s[2], s[1], s[3], f"{p_cnt} / {tc_count}", f"{pct}%"))
 
-    if len(table_data) == 1:
-        table_data.append(["", "", "No defaulters found!", "", "", "", ""])
-
-    pdf_buf = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_buf, pagesize=landscape(A4), rightMargin=15, leftMargin=15, topMargin=15, bottomMargin=15)
-    elements = []
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('HeaderTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#0f172a'), alignment=1)
     sub_style = ParagraphStyle('HeaderSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#dc2626'), alignment=1)
+    cell_name_style = ParagraphStyle('CellName', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, leading=11, textColor=colors.HexColor('#0f172a'))
+    cell_center_style = ParagraphStyle('CellCenter', parent=styles['Normal'], fontName='Helvetica', fontSize=9, alignment=1)
 
-    elements.append(Paragraph(college_name, title_style))
-    elements.append(Paragraph(f"DEFAULTERS REPORT (< 75%) — {subject.upper()} | {month.upper()} {year}", sub_style))
-    elements.append(Spacer(1, 10))
+    headers = ["Roll No", "Reg No", "Student Name", "Present / Total", "Attendance %", "Status"]
+    table_data = [[
+        Paragraph(f"<b>{h}</b>", ParagraphStyle('Hdr', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.whitesmoke, alignment=1)) for h in headers
+    ]]
 
-    # Extended width for Name column to avoid text wrapping
-    col_widths = [50, 90, 180, 100, 70, 70, 140]
+    for d in defaulters:
+        table_data.append([
+            Paragraph(str(d[0]), cell_center_style),
+            Paragraph(str(d[1]), cell_center_style),
+            Paragraph(str(d[2]), cell_name_style),
+            Paragraph(str(d[3]), cell_center_style),
+            Paragraph(f"<font color='#dc2626'><b>{d[4]}</b></font>", cell_center_style),
+            Paragraph("<font color='#dc2626'><b>Shortage (<75%)</b></font>", cell_center_style)
+        ])
+
+    pdf_buf = io.BytesIO()
+    doc = SimpleDocTemplate(pdf_buf, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+    elements = [
+        Paragraph(college_name, title_style),
+        Paragraph(f"ATTENDANCE DEFAULTERS LIST (< 75%) — {subject} ({month.upper()} {year})", sub_style),
+        Spacer(1, 12)
+    ]
+
+    total_avail_width = 800
+    col_widths = [60, 90, 310, 110, 100, 130]  # Student name gets maximum space
+
     t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#7f1d1d')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#991b1b')),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#fca5a5')),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#fef2f2')])
     ]))
     elements.append(t)
@@ -760,14 +770,25 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
         present_map = {(r[0], r[1]): r[2] for r in att_rows}
 
         c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
-        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT PATNA"
+        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
 
-        headers = ["Roll No", "Reg No", "Name"] + subjects + ["Overall %"]
-        table_data = [headers]
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('HeaderTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#0f172a'), alignment=1)
+        sub_style = ParagraphStyle('HeaderSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#d97706'), alignment=1)
+        cell_name_style = ParagraphStyle('CellName', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.HexColor('#0f172a'))
+        cell_center_style = ParagraphStyle('CellCenter', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=10, alignment=1)
+        hdr_style = ParagraphStyle('Hdr', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.whitesmoke, alignment=1)
+
+        headers = ["Roll", "Reg No", "Student Name"] + subjects + ["Overall %"]
+        table_data = [[Paragraph(f"<b>{h}</b>", hdr_style) for h in headers]]
 
         for st in students:
             st_id, reg, roll, name = st
-            row = [str(roll), str(reg), str(name)]
+            row = [
+                Paragraph(str(roll), cell_center_style),
+                Paragraph(str(reg), cell_center_style),
+                Paragraph(str(name), cell_name_style)
+            ]
             tot_p_all, tot_c_all = 0, 0
             for sub, sub_id in sub_map.items():
                 tot_c = sub_total_classes.get(sub, 0)
@@ -775,35 +796,35 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
                 tot_p_all += tot_p
                 tot_c_all += tot_c
                 pct = round((tot_p / tot_c * 100)) if tot_c > 0 else 0
-                row.append(f"{tot_p}/{tot_c} ({pct}%)")
+                row.append(Paragraph(f"{tot_p}/{tot_c}<br/>({pct}%)", cell_center_style))
             overall_pct = round((tot_p_all / tot_c_all * 100), 1) if tot_c_all > 0 else 0
-            row.append(f"{overall_pct}%")
+            row.append(Paragraph(f"<b>{overall_pct}%</b>", cell_center_style))
             table_data.append(row)
+
+    # Dynamic Column Width Allocation: Gives Student Name maximum proportional width
+    total_table_width = 800
+    num_subs = len(subjects)
+    fixed_roll_w = 40
+    fixed_reg_w = 80
+    fixed_pct_w = 55
+    sub_col_w = max(48, min(70, int(380 / max(1, num_subs))))
+    name_col_w = max(180, total_table_width - (fixed_roll_w + fixed_reg_w + fixed_pct_w + (sub_col_w * num_subs)))
+
+    col_widths = [fixed_roll_w, fixed_reg_w, name_col_w] + [sub_col_w] * num_subs + [fixed_pct_w]
 
     pdf_buf = io.BytesIO()
     doc = SimpleDocTemplate(pdf_buf, pagesize=landscape(A4), rightMargin=15, leftMargin=15, topMargin=15, bottomMargin=15)
-    elements = []
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('HeaderTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#0f172a'), alignment=1)
-    sub_style = ParagraphStyle('HeaderSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#d97706'), alignment=1)
-
-    elements.append(Paragraph(college_name, title_style))
-    elements.append(Paragraph(f"CONSOLIDATED ATTENDANCE REPORT — {month.upper()} {year}", sub_style))
-    elements.append(Spacer(1, 10))
-
-    # Dynamically allocate larger width to Name column
-    roll_w, reg_w, name_w, pct_w = 40, 80, 180, 60
-    rem_w = 780 - (roll_w + reg_w + name_w + pct_w)
-    sub_w = max(40, rem_w / max(1, len(subjects)))
-    col_widths = [roll_w, reg_w, name_w] + [sub_w]*len(subjects) + [pct_w]
+    elements = [
+        Paragraph(college_name, title_style),
+        Paragraph(f"CONSOLIDATED ATTENDANCE REPORT — {month.upper()} {year}", sub_style),
+        Spacer(1, 10)
+    ]
 
     t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f9ff')])
     ]))
@@ -1418,11 +1439,11 @@ def home():
                             <h3 class="text-xl font-black text-red-400 flex items-center gap-2">⚠️ Defaulters List (< 75% Attendance)</h3>
                             <p class="text-xs text-slate-300 mt-1">Students below 75% attendance in <b class="text-yellow-400" x-text="selectedSubject"></b> for <b class="text-yellow-400" x-text="selectedMonth + ' ' + selectedYear"></b>.</p>
                         </div>
-                        <div class="flex items-center gap-2">
-                            <span class="bg-red-950 text-red-400 font-bold border border-red-500/50 px-3 py-1.5 rounded-xl text-xs" x-text="defaultersList.length + ' Shortage'"></span>
-                            <a :href="'/api/download_defaulters_excel/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs py-1.5 px-3 rounded-xl shadow transition">📊 Excel</a>
-                            <a :href="'/api/download_defaulters_pdf/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-red-600 hover:bg-red-700 text-white font-black text-xs py-1.5 px-3 rounded-xl shadow transition">📥 PDF</a>
-                            <button @click="shareDefaultersPdf()" class="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs py-1.5 px-3 rounded-xl shadow transition flex items-center gap-1">🔗 Share</button>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="bg-red-950 text-red-400 font-bold border border-red-500/50 px-3 py-1 rounded-full text-xs" x-text="defaultersList.length + ' Students Shortage'"></span>
+                            <a :href="'/api/download_defaulters_excel/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs py-2 px-3 rounded-xl shadow transition">📊 Export Excel</a>
+                            <a :href="'/api/download_defaulters_pdf/' + userId + '?month=' + selectedMonth + '&year=' + selectedYear + '&subject=' + selectedSubject" class="bg-red-600 hover:bg-red-700 text-white font-black text-xs py-2 px-3 rounded-xl shadow transition">📥 Export PDF</a>
+                            <button @click="shareDefaultersPdf()" class="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs py-2 px-3 rounded-xl shadow transition">🔗 Share PDF</button>
                         </div>
                     </div>
                     <div class="overflow-x-auto bg-slate-900/80 rounded-2xl border border-red-500/30">
@@ -1471,7 +1492,7 @@ def home():
                 </div>
 
                 <div class="grid grid-cols-2 gap-8 items-start" x-show="students.length > 0">
-                    
+
                     <!-- ID CARD UI - ENLARGED -->
                     <div class="bg-gradient-to-b from-[#fefdfa] to-[#f8f5e9] text-slate-900 py-10 px-6 rounded-3xl shadow-2xl border-4 border-slate-300 max-w-sm mx-auto w-full min-h-[460px] flex flex-col justify-between relative">
                         <div>
@@ -1496,7 +1517,6 @@ def home():
 
                     <div class="space-y-6">
                         <div class="grid grid-cols-2 gap-4">
-                            <!-- LOCK REMOVED FROM MARK PRESENT / ABSENT BUTTONS -->
                             <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
                             <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
                         </div>
@@ -1580,8 +1600,8 @@ def home():
                     <table class="w-full text-slate-900 font-bold text-sm text-center">
                         <thead>
                             <tr class="bg-blue-900 text-white">
-                                <th class="p-3 border">Reg No</th>
                                 <th class="p-3 border">Roll No</th>
+                                <th class="p-3 border">Reg No</th>
                                 <th class="p-3 border text-left">Student Name</th>
                                 <template x-for="sub in reportSubjects"><th class="p-2 border" x-text="sub"></th></template>
                                 <th class="p-3 border">Overall %</th>
@@ -1590,8 +1610,8 @@ def home():
                         <tbody>
                             <template x-for="st in filteredReportRows">
                                 <tr class="border-b bg-sky-50">
-                                    <td class="p-3 border" x-text="st.reg_no"></td>
                                     <td class="p-3 border" x-text="st.roll_no"></td>
+                                    <td class="p-3 border" x-text="st.reg_no"></td>
                                     <td class="p-3 border text-left" x-text="st.name"></td>
                                     <template x-for="sub in reportSubjects"><td class="p-2 border" x-text="st.subs[sub]"></td></template>
                                     <td class="p-3 border font-black text-emerald-700" x-text="st.overall"></td>
@@ -1807,7 +1827,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- 2. DATE-WISE ATTENDANCE LOG (ABOVE LEAVES) -->
+                <!-- 2. DATE-WISE ATTENDANCE LOG -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Date-wise Attendance Register (P/A Status)</h3>
                     <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
@@ -1839,7 +1859,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- 3. MY SUBMITTED LEAVE APPLICATIONS (AT BOTTOM) -->
+                <!-- 3. MY SUBMITTED LEAVE APPLICATIONS -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-sky-400 mb-4">✉️ My Submitted Leave Applications</h3>
                     <div class="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
@@ -1938,10 +1958,10 @@ def home():
 
                 months: mList,
                 years: yList,
-                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT PATNA',
+                collegeName: 'INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)',
                 appSubtitle: 'ATTENDANCE MANAGEMENT SYSTEM',
                 courseName: 'BCA',
-                sectionName: 'Semester 3A',
+                sectionName: 'Semester 1',
                 collegeLogo: 'https://i.ibb.co/3s68K1v/tree-logo.png',
 
                 totalStudents: 0,
@@ -2551,40 +2571,22 @@ def home():
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
-                    try {
-                        let response = await fetch(pdfUrl);
-                        let blob = await response.blob();
-                        let file = new File([blob], fileName, {type: "application/pdf"});
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ files: [file] });
-                        } else throw new Error();
-                    } catch(e) {
-                        let a = document.createElement('a');
-                        a.href = pdfUrl;
-                        a.download = fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                    }
+                    let a = document.createElement('a');
+                    a.href = pdfUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
                 },
                 async shareDefaultersPdf() {
                     let pdfUrl = `/api/download_defaulters_pdf/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}`;
                     let fileName = `Defaulters_${this.selectedSubject}_${this.selectedMonth}_${this.selectedYear}.pdf`;
-                    try {
-                        let response = await fetch(pdfUrl);
-                        let blob = await response.blob();
-                        let file = new File([blob], fileName, {type: "application/pdf"});
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ files: [file] });
-                        } else throw new Error();
-                    } catch(e) {
-                        let a = document.createElement('a');
-                        a.href = pdfUrl;
-                        a.download = fileName;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                    }
+                    let a = document.createElement('a');
+                    a.href = pdfUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
                 },
                 logout() {
                     this.loggedIn = false;
@@ -2599,3 +2601,4 @@ def home():
     </script>
 </body>
 </html>
+"""

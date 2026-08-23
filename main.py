@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Production Edition")
+app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -1201,7 +1201,10 @@ def home():
                             <label class="block text-sky-400 font-bold text-xs mb-1">Password</label>
                             <input type="password" x-model="authForm.password" placeholder="Enter Password" required class="w-full p-3 rounded-xl text-sm">
                         </div>
-                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm" x-text="isLogin ? 'FACULTY LOGIN' : 'CREATE CLASS PORTAL'"></button>
+                        <button type="submit" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2">
+                            <span x-show="isProcessing">⏳ Please wait...</span>
+                            <span x-show="!isProcessing" x-text="isLogin ? 'FACULTY LOGIN' : 'CREATE CLASS PORTAL'"></span>
+                        </button>
                     </form>
                 </div>
 
@@ -1217,7 +1220,10 @@ def home():
                             <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
                             <input type="text" x-model="studentForm.name" placeholder="Enter your full name" required class="w-full p-3 rounded-xl text-sm">
                         </div>
-                        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg transition text-sm">ACCESS STUDENT DASHBOARD</button>
+                        <button type="submit" :disabled="isProcessing" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2">
+                            <span x-show="isProcessing">⏳ Loading Profile...</span>
+                            <span x-show="!isProcessing">ACCESS STUDENT DASHBOARD</span>
+                        </button>
                     </form>
                 </div>
                 <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4"></p>
@@ -1307,7 +1313,7 @@ def home():
                     </div>
                 </div>
 
-                <!-- DEFAULTERS LIST (EXACTLY BELOW STATS) -->
+                <!-- DEFAULTERS LIST -->
                 <div class="glass-card p-6 rounded-3xl border-2 border-red-500/50 shadow-2xl">
                     <div class="flex justify-between items-center mb-4 pb-3 border-b border-red-500/30">
                         <div>
@@ -1386,8 +1392,8 @@ def home():
 
                     <div class="space-y-6">
                         <div class="grid grid-cols-2 gap-4">
-                            <button @click="markStatusBtn('Present')" class="bg-emerald-500 hover:bg-emerald-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
-                            <button @click="markStatusBtn('Absent')" class="bg-red-500 hover:bg-red-600 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
+                            <button @click="markStatusBtn('Present')" :disabled="isProcessing" class="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🟢 MARK PRESENT (P)</button>
+                            <button @click="markStatusBtn('Absent')" :disabled="isProcessing" class="bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-black py-5 rounded-2xl shadow-xl text-lg transition">🔴 MARK ABSENT (A)</button>
                         </div>
                         <div>
                             <label class="block text-white font-bold text-sm mb-1">🔍 Search Student by Reg No:</label>
@@ -1498,7 +1504,7 @@ def home():
                         <h2 class="text-2xl font-black text-white">✉️ Student Leave Applications Inbox</h2>
                         <p class="text-xs text-slate-300 mt-1">Review student applications and reply with approval/rejection remarks.</p>
                     </div>
-                    <button @click="loadFacultyLeaves()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
+                    <button @click="loadFacultyLeaves()" :disabled="isProcessing" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
                 </div>
 
                 <div class="space-y-4">
@@ -1520,8 +1526,8 @@ def home():
                             </div>
                             <div class="pt-3 border-t border-slate-700 flex gap-3 items-center">
                                 <input type="text" x-model="leaveRemarkInput[leave.id]" placeholder="Enter response / message for student..." class="flex-1 p-2.5 rounded-xl text-xs bg-white text-slate-900 font-bold">
-                                <button @click="respondLeave(leave.id, 'Approved')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">✅ Approve</button>
-                                <button @click="respondLeave(leave.id, 'Rejected')" class="bg-red-600 hover:bg-red-700 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">❌ Reject</button>
+                                <button @click="respondLeave(leave.id, 'Approved')" :disabled="isProcessing" class="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">✅ Approve</button>
+                                <button @click="respondLeave(leave.id, 'Rejected')" :disabled="isProcessing" class="bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black px-4 py-2.5 rounded-xl text-xs shadow">❌ Reject</button>
                             </div>
                         </div>
                     </template>
@@ -1545,7 +1551,7 @@ def home():
                         <select x-model="resetSubject" class="w-full p-3 rounded-xl"><option value="All Subjects">All Subjects</option><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                         <input type="date" x-show="resetScope === 'date'" x-model="resetDate" class="w-full p-3 rounded-xl">
                     </div>
-                    <button @click="executeReset" class="bg-red-600 hover:bg-red-700 text-white font-black py-3 px-6 rounded-xl shadow">⚠️ Execute Purge / Reset Records</button>
+                    <button @click="executeReset" :disabled="isProcessing" class="bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black py-3 px-6 rounded-xl shadow">⚠️ Execute Purge / Reset Records</button>
                 </div>
             </div>
 
@@ -1555,7 +1561,7 @@ def home():
                     <div class="glass-card p-6 rounded-2xl">
                         <h3 class="text-xl font-black text-blue-400 mb-2">1️⃣ Register Students (Excel/CSV)</h3>
                         <input type="file" id="studentOnlyFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-blue-50 text-slate-900">
-                        <button @click="importStudentsOnly" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow">Add Students</button>
+                        <button @click="importStudentsOnly" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Add Students</button>
                     </div>
                     <div class="glass-card p-6 rounded-2xl">
                         <h3 class="text-xl font-black text-emerald-400 mb-2">2️⃣ Bulk Mark Attendance (Excel/CSV)</h3>
@@ -1564,7 +1570,7 @@ def home():
                             <input type="date" x-model="importDate" class="w-full p-2.5 rounded-xl text-sm">
                         </div>
                         <input type="file" id="attendanceFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-emerald-50 text-slate-900">
-                        <button @click="importAttendanceOnly" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow">Mark Attendance from File</button>
+                        <button @click="importAttendanceOnly" :disabled="isProcessing" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Mark Attendance from File</button>
                     </div>
                 </div>
 
@@ -1575,7 +1581,7 @@ def home():
                             <input type="text" x-model="newStudent.reg_no" placeholder="Registration No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.roll_no" placeholder="Roll No" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="newStudent.name" placeholder="Full Name" required class="w-full p-3 rounded-xl">
-                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Student</button>
+                            <button type="submit" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Save Student</button>
                         </form>
                     </div>
                     <div class="glass-card p-6 rounded-2xl">
@@ -1587,12 +1593,12 @@ def home():
                             <input type="text" x-model="profileForm.contact" placeholder="Contact" class="w-full p-2 rounded-xl text-sm">
                             <input type="text" x-model="profileForm.parent_name" placeholder="Guardian Name" class="w-full p-2 rounded-xl text-sm">
                             <input type="text" x-model="profileForm.parent_contact" placeholder="Guardian Contact" class="w-full p-2 rounded-xl text-sm">
-                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-2.5 rounded-xl shadow">Save Profile</button>
+                            <button type="submit" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Save Profile</button>
                         </form>
                     </div>
                     <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
                         <h3 class="text-xl font-black text-red-400 mb-2">⚠️ Delete All Students</h3>
-                        <button @click="deleteAllStudents" class="w-full bg-red-700 hover:bg-red-800 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
+                        <button @click="deleteAllStudents" :disabled="isProcessing" class="w-full bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
                     </div>
                 </div>
             </div>
@@ -1607,7 +1613,7 @@ def home():
                             <input type="text" x-model="appSubtitle" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="courseName" required class="w-full p-3 rounded-xl">
                             <input type="text" x-model="sectionName" required class="w-full p-3 rounded-xl">
-                            <button type="submit" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Save Info</button>
+                            <button type="submit" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Save Info</button>
                         </form>
                     </div>
                     <div class="space-y-6">
@@ -1615,17 +1621,17 @@ def home():
                             <h3 class="text-xl font-black text-sky-400 mb-4">📚 Add / Delete Subject</h3>
                             <form @submit.prevent="addSubject" class="space-y-3 mb-4">
                                 <input type="text" x-model="newSubject" placeholder="Subject Name" required class="w-full p-3 rounded-xl">
-                                <button type="submit" class="w-full bg-blue-500 text-white font-black py-2.5 rounded-xl shadow">Add Subject</button>
+                                <button type="submit" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Add Subject</button>
                             </form>
                             <form @submit.prevent="deleteSubject" class="space-y-3">
                                 <select x-model="delSubject" class="w-full p-3 rounded-xl"><option value="">--- Select Subject ---</option><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
-                                <button type="submit" class="w-full bg-red-500 text-white font-black py-2.5 rounded-xl shadow">Delete Subject</button>
+                                <button type="submit" :disabled="isProcessing" class="w-full bg-red-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Delete Subject</button>
                             </form>
                         </div>
                         <div class="glass-card p-6 rounded-2xl">
                             <h3 class="text-xl font-black text-sky-400 mb-4">🖼️ Logo Upload</h3>
                             <input type="file" id="logoFile" class="w-full p-3 rounded-xl mb-4 text-sm bg-sky-50">
-                            <button @click="uploadLogo" class="w-full bg-blue-500 text-white font-black py-3 rounded-xl shadow">Upload Logo</button>
+                            <button @click="uploadLogo" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Upload Logo</button>
                         </div>
                     </div>
                 </div>
@@ -1671,6 +1677,7 @@ def home():
             </div>
 
             <div class="col-span-1 md:col-span-2 space-y-8">
+                <!-- 1. SUBJECT WISE COMPILATION -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-amber-400 mb-6">📊 Subject-wise Compilation</h3>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1689,6 +1696,39 @@ def home():
                     </div>
                 </div>
 
+                <!-- 2. DATE-WISE ATTENDANCE LOG (NOW PLACED ABOVE LEAVE SECTION) -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 class="text-xl font-black text-emerald-400 mb-4 flex items-center gap-2">📅 Date-wise Attendance Register (P/A Status)</h3>
+                    <div class="max-h-80 overflow-y-auto pr-2 custom-scrollbar">
+                        <table class="w-full text-left text-sm">
+                            <thead class="sticky top-0 bg-slate-900/90 text-sky-400 font-bold backdrop-blur">
+                                <tr>
+                                    <th class="p-3 rounded-tl-lg">Date</th>
+                                    <th class="p-3">Subject</th>
+                                    <th class="p-3 text-center rounded-tr-lg">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-slate-200 font-semibold">
+                                <template x-for="rec in studentDashData.history">
+                                    <tr class="border-b border-slate-700/50 hover:bg-slate-800/50">
+                                        <td class="p-3 font-mono" x-text="rec.date"></td>
+                                        <td class="p-3 font-bold" x-text="rec.subject"></td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-3 py-1 rounded-full text-xs font-black shadow"
+                                                  :class="rec.status === 'Present' ? 'bg-emerald-900 text-emerald-400 border border-emerald-500' : 'bg-red-900 text-red-400 border border-red-500'"
+                                                  x-text="rec.status === 'Present' ? 'P' : 'A'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="!studentDashData.history || studentDashData.history.length === 0">
+                                    <td colspan="3" class="text-center p-6 text-slate-500">No attendance marked yet.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 3. MY SUBMITTED LEAVE APPLICATIONS (PLACED AT THE BOTTOM) -->
                 <div class="glass-card p-6 rounded-3xl">
                     <h3 class="text-xl font-black text-sky-400 mb-4">✉️ My Submitted Leave Applications</h3>
                     <div class="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
@@ -1754,7 +1794,10 @@ def home():
                     </div>
                     <div class="flex justify-end gap-3 pt-2">
                         <button type="button" @click="openLeaveModal = false" class="px-5 py-2.5 rounded-xl text-slate-400 text-xs font-bold">Cancel</button>
-                        <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-6 py-2.5 rounded-xl shadow text-xs">🚀 Send to Faculty</button>
+                        <button type="submit" :disabled="isProcessing" class="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black px-6 py-2.5 rounded-xl shadow text-xs flex items-center gap-2">
+                            <span x-show="isProcessing">⏳ Submitting...</span>
+                            <span x-show="!isProcessing">🚀 Send to Faculty</span>
+                        </button>
                     </div>
                 </form>
             </div>
@@ -1775,6 +1818,7 @@ def home():
                 userRole: '',
                 authRole: 'faculty',
                 isLogin: true,
+                isProcessing: false,
                 authForm: { username: '', password: '' },
                 studentForm: { reg_no: '', name: '' },
                 authError: '',
@@ -1867,6 +1911,8 @@ def home():
                     return this.facultyLeaves.filter(l => l.status === 'Pending').length;
                 },
                 async submitAuth() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let endpoint = this.isLogin ? '/api/login' : '/api/register';
                     let formData = new FormData();
                     formData.append('username', this.authForm.username);
@@ -1879,16 +1925,20 @@ def home():
                             this.userId = this.authForm.username;
                             this.loggedIn = true;
                             this.authError = '';
-                            this.loadData();
-                            this.loadFacultyLeaves();
+                            await this.loadData();
+                            await this.loadFacultyLeaves();
                         } else {
                             this.authError = data.detail || "Authentication Failed.";
                         }
                     } catch(e) {
                         this.authError = "Server Connection Error.";
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async submitStudentAuth() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('reg_no', this.studentForm.reg_no);
                     formData.append('name', this.studentForm.name);
@@ -1900,12 +1950,14 @@ def home():
                             this.userId = data.reg_no; 
                             this.loggedIn = true;
                             this.authError = '';
-                            this.loadStudentDashboard(data.faculty_id, data.reg_no);
+                            await this.loadStudentDashboard(data.faculty_id, data.reg_no);
                         } else {
                             this.authError = data.detail || "Student Login Failed.";
                         }
                     } catch(e) {
                         this.authError = "Server Connection Error.";
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async loadStudentDashboard(fac_id, reg_no) {
@@ -1923,7 +1975,8 @@ def home():
                     }
                 },
                 async submitLeaveApplication() {
-                    if (!this.studentDashData) return;
+                    if (!this.studentDashData || this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('faculty_id', this.studentDashData.faculty_id);
                     formData.append('reg_no', this.studentDashData.student.reg_no);
@@ -1941,12 +1994,14 @@ def home():
                             alert(data.message);
                             this.openLeaveModal = false;
                             this.leaveForm.reason = '';
-                            this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
+                            await this.loadStudentDashboard(this.studentDashData.faculty_id, this.studentDashData.student.reg_no);
                         } else {
                             alert("Failed: " + data.detail);
                         }
                     } catch(e) {
                         alert("Error connecting to server.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async loadFacultyLeaves() {
@@ -1959,6 +2014,8 @@ def home():
                     }
                 },
                 async respondLeave(leaveId, status) {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let remark = this.leaveRemarkInput[leaveId] || "";
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
@@ -1971,12 +2028,14 @@ def home():
                         let data = await res.json();
                         if (res.ok) {
                             alert(data.message);
-                            this.loadFacultyLeaves();
+                            await this.loadFacultyLeaves();
                         } else {
                             alert("Error: " + data.detail);
                         }
                     } catch(e) {
                         alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async loadData() {
@@ -2075,6 +2134,8 @@ def home():
                     this.currentStudentPhoto = data.photo_data;
                 },
                 async markStatusBtn(status) {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', this.currentStudent.id);
@@ -2082,15 +2143,21 @@ def home():
                     formData.append('date_str', this.selectedDate);
                     formData.append('status', status);
 
-                    let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                    if (res.ok) {
-                        if (this.currentIndex < this.students.length - 1) {
-                            this.currentIndex++;
-                            this.fetchStudentDetails();
+                    try {
+                        let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            if (this.currentIndex < this.students.length - 1) {
+                                this.currentIndex++;
+                                this.fetchStudentDetails();
+                            }
+                            await this.loadData();
+                        } else {
+                            alert("Error saving attendance");
                         }
-                        this.loadData();
-                    } else {
-                        alert("Error saving attendance");
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 searchByReg() {
@@ -2113,145 +2180,222 @@ def home():
                     }
                 },
                 async addStudent() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('reg_no', this.newStudent.reg_no);
                     formData.append('roll_no', this.newStudent.roll_no);
                     formData.append('name', this.newStudent.name);
-                    let res = await fetch('/api/add_student', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/add_student', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.newStudent = { reg_no: '', roll_no: '', name: '' };
-                        this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error: " + err.detail);
+                        if (res.ok) {
+                            alert(data.message);
+                            this.newStudent = { reg_no: '', roll_no: '', name: '' };
+                            await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async deleteStudent() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('reg_no', this.delRegNo);
-                    let res = await fetch('/api/delete_student', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/delete_student', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.delRegNo = '';
-                        this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error: " + err.detail);
+                        if (res.ok) {
+                            alert(data.message);
+                            this.delRegNo = '';
+                            await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async deleteAllStudents() {
                     if (!confirm("Are you sure? This cannot be undone.")) return;
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
-                    let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/delete_all_students', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.loadData();
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadData();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async importStudentsOnly() {
                     let fileInput = document.getElementById('studentOnlyFile');
                     if (fileInput.files.length === 0) { alert('Select a file.'); return; }
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
-                    let res = await fetch('/api/import_students', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/import_students', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error: " + err.detail);
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async importAttendanceOnly() {
                     let fileInput = document.getElementById('attendanceFile');
                     if (fileInput.files.length === 0) { alert('Select a file.'); return; }
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
                     formData.append('subject', this.importSubject);
                     formData.append('date_str', this.importDate);
-                    let res = await fetch('/api/import_attendance', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/import_attendance', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.loadData();
-                    } else {
-                        let err = await res.json();
-                        alert("Error: " + err.detail);
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadData();
+                        } else {
+                            alert("Error: " + data.detail);
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async executeReset() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('scope', this.resetScope);
                     formData.append('subject', this.resetSubject);
                     if (this.resetScope === 'single') formData.append('reg_no', this.resetReg);
                     if (this.resetScope === 'date') formData.append('date_str', this.resetDate);
-                    let res = await fetch('/api/reset_attendance', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/reset_attendance', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.loadData();
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadData();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async addSubject() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('subject_name', this.newSubject);
-                    let res = await fetch('/api/add_subject', { method: 'POST', body: formData });
-                    if (res.ok) {
-                        this.newSubject = '';
-                        this.loadData();
+                    try {
+                        let res = await fetch('/api/add_subject', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            this.newSubject = '';
+                            await this.loadData();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async deleteSubject() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('subject_name', this.delSubject);
-                    let res = await fetch('/api/delete_subject', { method: 'POST', body: formData });
-                    if (res.ok) {
-                        this.delSubject = '';
-                        this.loadData();
+                    try {
+                        let res = await fetch('/api/delete_subject', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            this.delSubject = '';
+                            await this.loadData();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async uploadLogo() {
                     let fileInput = document.getElementById('logoFile');
                     if (fileInput.files.length === 0) return;
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('file', fileInput.files[0]);
-                    let res = await fetch('/api/upload_logo', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/upload_logo', { method: 'POST', body: formData });
                         let data = await res.json();
-                        this.collegeLogo = data.logo_url;
-                        alert(data.message);
+                        if (res.ok) {
+                            this.collegeLogo = data.logo_url;
+                            alert(data.message);
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async saveCollegeProfile() {
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('college_name', this.collegeName);
                     formData.append('subtitle', this.appSubtitle);
                     formData.append('course_name', this.courseName);
                     formData.append('section_name', this.sectionName);
-                    let res = await fetch('/api/save_college_profile', { method: 'POST', body: formData });
-                    if (res.ok) {
+                    try {
+                        let res = await fetch('/api/save_college_profile', { method: 'POST', body: formData });
                         let data = await res.json();
-                        alert(data.message);
-                        this.loadData();
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadData();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async saveStudentProfile() {
-                    if (!this.profileReg) return;
+                    if (!this.profileReg || this.isProcessing) return;
+                    this.isProcessing = true;
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('reg_no', this.profileReg);
@@ -2262,10 +2406,16 @@ def home():
                     formData.append('res_type', this.profileForm.res_type);
                     let photoInput = document.getElementById('studentPhotoFile');
                     if (photoInput.files.length > 0) formData.append('file', photoInput.files[0]);
-                    let res = await fetch('/api/save_student_profile', { method: 'POST', body: formData });
-                    if (res.ok) {
-                        alert("Saved!");
-                        this.fetchStudentDetails();
+                    try {
+                        let res = await fetch('/api/save_student_profile', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            alert("Profile Saved!");
+                            await this.fetchStudentDetails();
+                        }
+                    } catch(e) {
+                        alert("Network error.");
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async shareViaEmail() {

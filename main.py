@@ -401,6 +401,135 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         "college_logo": logo_url
     }
 
+# ==========================================
+# ABSENTEES LIST API & PDF GENERATOR
+# ==========================================
+@app.get("/api/absentees/{user_id}")
+def get_absentees_list(user_id: str, subject: str = "BE", date_str: str = ""):
+    safe_uid = get_safe_prefix(user_id)
+    t_students = f"{safe_uid}_students"
+    t_subjects = f"{safe_uid}_subjects"
+    t_attendance = f"{safe_uid}_attendance"
+
+    with engine.begin() as conn:
+        sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+        if not sub_id_res:
+            return {"absentees": []}
+        sub_id = sub_id_res[0]
+
+        absentees_raw = conn.execute(text(f"""
+            SELECT s.reg_no, s.roll_no, s.name
+            FROM {t_students} s
+            JOIN {t_attendance} a ON s.id = a.student_id
+            WHERE a.subject_id = :sid AND a.date = :dt AND a.status = 'Absent'
+        """), {"sid": sub_id, "dt": date_str}).fetchall()
+
+        absentees = [{"reg_no": r[0], "roll_no": r[1], "name": r[2]} for r in absentees_raw]
+        
+        def safe_roll(x):
+            try:
+                return int(''.join(filter(str.isdigit, str(x["roll_no"]))))
+            except:
+                return str(x["roll_no"])
+        absentees = sorted(absentees, key=safe_roll)
+        
+        return {"absentees": absentees}
+
+@app.get("/api/download_absentees_pdf/{user_id}")
+def download_absentees_pdf(user_id: str, subject: str = "BE", date_str: str = ""):
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table as RLTable, TableStyle, Paragraph, Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    except ImportError:
+        raise HTTPException(status_code=500, detail="ReportLab not installed")
+
+    safe_uid = get_safe_prefix(user_id)
+    t_students = f"{safe_uid}_students"
+    t_subjects = f"{safe_uid}_subjects"
+    t_attendance = f"{safe_uid}_attendance"
+    t_settings = f"{safe_uid}_settings"
+
+    with engine.begin() as conn:
+        c_name = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key='college_name'")).fetchone()
+        college_name = c_name[0] if c_name else "INTERNATIONAL SCHOOL OF MANAGEMENT (ISM)"
+
+        sub_id_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
+        sub_id = sub_id_res[0] if sub_id_res else None
+
+        absentees = []
+        if sub_id and date_str:
+            absentees_raw = conn.execute(text(f"""
+                SELECT s.roll_no, s.reg_no, s.name
+                FROM {t_students} s
+                JOIN {t_attendance} a ON s.id = a.student_id
+                WHERE a.subject_id = :sid AND a.date = :dt AND a.status = 'Absent'
+            """), {"sid": sub_id, "dt": date_str}).fetchall()
+            
+            def safe_roll(x):
+                try:
+                    return int(''.join(filter(str.isdigit, str(x[0]))))
+                except:
+                    return str(x[0])
+            absentees = sorted(absentees_raw, key=safe_roll)
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('HeaderTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#0f172a'), alignment=1)
+    sub_style = ParagraphStyle('HeaderSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#dc2626'), alignment=1)
+    cell_name_style = ParagraphStyle('CellName', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, leading=12, textColor=colors.HexColor('#0f172a'))
+    cell_center_style = ParagraphStyle('CellCenter', parent=styles['Normal'], fontName='Helvetica', fontSize=10, alignment=1)
+
+    headers = ["Sl No", "Roll No", "Reg No", "Student Name"]
+    table_data = [[
+        Paragraph(f"<b>{h}</b>", ParagraphStyle('Hdr', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, textColor=colors.whitesmoke, alignment=1)) for h in headers
+    ]]
+
+    for idx, d in enumerate(absentees, start=1):
+        table_data.append([
+            Paragraph(str(idx), cell_center_style),
+            Paragraph(str(d[0]), cell_center_style),
+            Paragraph(str(d[1]), cell_center_style),
+            Paragraph(str(d[2]), cell_name_style)
+        ])
+
+    pdf_buf = io.BytesIO()
+    doc = SimpleDocTemplate(pdf_buf, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    elements = [
+        Paragraph(college_name, title_style),
+        Paragraph(f"DAILY ABSENTEES REPORT — {subject} ({date_str})", sub_style),
+        Spacer(1, 15)
+    ]
+
+    col_widths = [50, 80, 100, 270]
+
+    t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
+    
+    if not absentees:
+        table_data.append([Paragraph("No Absentees / Data Not Found for this date", cell_center_style), "", "", ""])
+        style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#991b1b')),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#fca5a5')),
+            ('SPAN', (0, 1), (3, 1))
+        ])
+    else:
+        style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#991b1b')),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#fca5a5')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#fef2f2')])
+        ])
+        
+    t.setStyle(style)
+    elements.append(t)
+    doc.build(elements)
+    pdf_buf.seek(0)
+    return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Absentees_{subject}_{date_str}.pdf"})
+
+
 @app.get("/api/download_defaulters_excel/{user_id}")
 def download_defaulters_excel(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE"):
     safe_uid = get_safe_prefix(user_id)
@@ -525,7 +654,7 @@ def download_defaulters_pdf(user_id: str, month: str = "July", year: int = 2026,
     ]
 
     total_avail_width = 800
-    col_widths = [60, 90, 310, 110, 100, 130]  # Student name gets maximum space
+    col_widths = [60, 90, 310, 110, 100, 130] 
 
     t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
@@ -801,7 +930,6 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
             row.append(Paragraph(f"<b>{overall_pct}%</b>", cell_center_style))
             table_data.append(row)
 
-    # Dynamic Column Width Allocation: Gives Student Name maximum proportional width
     total_table_width = 800
     num_subs = len(subjects)
     fixed_roll_w = 40
@@ -1363,6 +1491,9 @@ def home():
                     <button @click="currentTab = 'dashboard'; loadData()" :class="currentTab === 'dashboard' ? 'bg-blue-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-blue-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📊 Dashboard</button>
                     <button @click="currentTab = 'mark'; loadData()" :class="currentTab === 'mark' ? 'bg-emerald-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-emerald-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📝 Mark Attendance</button>
                     <button @click="currentTab = 'table'; syncToLive(); loadTableData()" :class="currentTab === 'table' ? 'bg-purple-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-purple-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📅 Attendance Table</button>
+                    
+                    <button @click="currentTab = 'absentees'; loadAbsentees()" :class="currentTab === 'absentees' ? 'bg-rose-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-rose-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🔴 Absentees List</button>
+                    
                     <button @click="currentTab = 'report'; syncToLive(); loadReportData()" :class="currentTab === 'report' ? 'bg-amber-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-amber-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📑 Monthly Compile Report</button>
                     <button @click="currentTab = 'leaves'; loadFacultyLeaves()" :class="currentTab === 'leaves' ? 'bg-indigo-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-indigo-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center justify-between">
                         <span class="flex items-center gap-2">✉️ Leave Requests</span>
@@ -1579,6 +1710,62 @@ def home():
                             </template>
                         </tbody>
                     </table>
+                </div>
+            </div>
+
+            <!-- ABSENTEES TAB -->
+            <div x-show="currentTab === 'absentees'">
+                <div class="glass-card p-6 rounded-3xl shadow-2xl border-2 border-rose-500/50">
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                            <h2 class="text-2xl font-black text-rose-400">🔴 Daily Absentees Report</h2>
+                            <p class="text-xs text-slate-300">View and share the list of absent students for a specific date.</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <a :href="'/api/download_absentees_pdf/' + userId + '?subject=' + absenteesSubject + '&date_str=' + absenteesDate" class="bg-rose-600 hover:bg-rose-700 text-white font-black text-xs py-2 px-3 rounded-xl shadow transition">📥 Export PDF</a>
+                            <button @click="shareAbsenteesPdf()" class="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs py-2 px-3 rounded-xl shadow transition">🔗 Share PDF</button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4 mb-6">
+                        <div>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">Subject</label>
+                            <select x-model="absenteesSubject" @change="loadAbsentees()" class="w-full p-3 rounded-xl text-slate-900 font-bold">
+                                <template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sky-400 font-bold text-xs mb-1">Date</label>
+                            <input type="date" x-model="absenteesDate" @change="loadAbsentees()" class="w-full p-3 rounded-xl text-slate-900 font-bold">
+                        </div>
+                    </div>
+                    
+                    <div class="overflow-x-auto bg-slate-900/80 rounded-2xl border border-rose-500/30">
+                        <table class="w-full text-sm text-center">
+                            <thead>
+                                <tr class="bg-rose-950/80 text-rose-300 font-bold border-b border-rose-500/40">
+                                    <th class="p-3 w-16">Sl No</th>
+                                    <th class="p-3 w-28">Roll No</th>
+                                    <th class="p-3 w-40">Reg No</th>
+                                    <th class="p-3 text-left">Student Name</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-slate-200">
+                                <template x-for="(st, index) in absenteesList">
+                                    <tr class="border-b border-slate-800 hover:bg-rose-950/20 font-semibold">
+                                        <td class="p-3 text-slate-400 font-mono" x-text="index + 1"></td>
+                                        <td class="p-3 font-mono" x-text="st.roll_no"></td>
+                                        <td class="p-3 text-sky-400" x-text="st.reg_no"></td>
+                                        <td class="p-3 text-left font-bold text-white" x-text="st.name"></td>
+                                    </tr>
+                                </template>
+                                <tr x-show="absenteesList.length === 0">
+                                    <td colspan="4" class="p-6 text-center text-emerald-400 font-bold">
+                                        🎉 No absentees found for this date and subject!
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -1992,6 +2179,11 @@ def home():
                 tableNumDays: 31,
                 tableRows: [],
                 tableTotalClasses: 0,
+                
+                // ABSENTEES LIST
+                absenteesList: [],
+                absenteesSubject: '',
+                absenteesDate: curDate,
 
                 reportMonth: curMonth,
                 reportYear: curYear,
@@ -2188,6 +2380,7 @@ def home():
                         if (!this.selectedSubject && this.subjects.length > 0) this.selectedSubject = this.subjects[0];
                         if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
                         if (!this.importSubject && this.subjects.length > 0) this.importSubject = this.subjects[0];
+                        if (!this.absenteesSubject && this.subjects.length > 0) this.absenteesSubject = this.subjects[0];
                         this.students = data.students;
                         if (this.students.length > 0) this.fetchStudentDetails();
                     } catch(e) {
@@ -2201,6 +2394,18 @@ def home():
                     this.tableNumDays = data.num_days;
                     this.tableRows = data.table_data;
                     this.tableTotalClasses = data.total_classes;
+                },
+                async loadAbsentees() {
+                    if (!this.absenteesSubject && this.subjects.length > 0) this.absenteesSubject = this.subjects[0];
+                    if (!this.absenteesDate) this.absenteesDate = this.selectedDate;
+                    if (!this.absenteesSubject) return;
+                    try {
+                        let res = await fetch(`/api/absentees/${this.userId}?subject=${this.absenteesSubject}&date_str=${this.absenteesDate}`);
+                        let data = await res.json();
+                        this.absenteesList = data.absentees || [];
+                    } catch(e) {
+                        console.error("Error loading absentees:", e);
+                    }
                 },
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day];
@@ -2581,6 +2786,16 @@ def home():
                 async shareDefaultersPdf() {
                     let pdfUrl = `/api/download_defaulters_pdf/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}`;
                     let fileName = `Defaulters_${this.selectedSubject}_${this.selectedMonth}_${this.selectedYear}.pdf`;
+                    let a = document.createElement('a');
+                    a.href = pdfUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                },
+                async shareAbsenteesPdf() {
+                    let pdfUrl = `/api/download_absentees_pdf/${this.userId}?subject=${this.absenteesSubject}&date_str=${this.absenteesDate}`;
+                    let fileName = `Absentees_${this.absenteesSubject}_${this.absenteesDate}.pdf`;
                     let a = document.createElement('a');
                     a.href = pdfUrl;
                     a.download = fileName;

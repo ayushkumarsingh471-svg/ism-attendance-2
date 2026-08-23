@@ -1019,7 +1019,7 @@ def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: s
                 else:
                     sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
                     if sub_res:
-                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"dt": date_str, "subid": sub_res[0]})
+                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"subid": sub_res[0]})
         return {"success": True, "message": "Attendance logs reset executed successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
@@ -2773,36 +2773,53 @@ def home():
                         this.isProcessing = false;
                     }
                 },
+                
+                // Helper Function For Native Sharing Mobile/Desktop
+                async shareFileNative(pdfUrl, fileName, titleText) {
+                    try {
+                        if (navigator.share && navigator.canShare) {
+                            let response = await fetch(pdfUrl);
+                            let blob = await response.blob();
+                            let file = new File([blob], fileName, { type: 'application/pdf' });
+                            
+                            if (navigator.canShare({ files: [file] })) {
+                                await navigator.share({
+                                    title: titleText,
+                                    text: 'Please find the attached document.',
+                                    files: [file]
+                                });
+                                return;
+                            }
+                        }
+                        // Fallback if browser doesn't support sharing files
+                        alert("Native sharing is not supported on this browser. Downloading instead...");
+                        let a = document.createElement('a');
+                        a.href = pdfUrl;
+                        a.download = fileName;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    } catch (e) {
+                        console.log("Sharing cancelled or failed.", e);
+                    }
+                },
+
                 async shareViaEmail() {
                     let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
-                    let a = document.createElement('a');
-                    a.href = pdfUrl;
-                    a.download = fileName;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    await this.shareFileNative(pdfUrl, fileName, "Monthly Attendance Report");
                 },
                 async shareDefaultersPdf() {
                     let pdfUrl = `/api/download_defaulters_pdf/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}`;
                     let fileName = `Defaulters_${this.selectedSubject}_${this.selectedMonth}_${this.selectedYear}.pdf`;
-                    let a = document.createElement('a');
-                    a.href = pdfUrl;
-                    a.download = fileName;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    await this.shareFileNative(pdfUrl, fileName, "Defaulters Report");
                 },
                 async shareAbsenteesPdf() {
                     let pdfUrl = `/api/download_absentees_pdf/${this.userId}?subject=${this.absenteesSubject}&date_str=${this.absenteesDate}`;
                     let fileName = `Absentees_${this.absenteesSubject}_${this.absenteesDate}.pdf`;
-                    let a = document.createElement('a');
-                    a.href = pdfUrl;
-                    a.download = fileName;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    await this.shareFileNative(pdfUrl, fileName, "Daily Absentees Report");
                 },
+                
                 logout() {
                     this.loggedIn = false;
                     this.userRole = '';

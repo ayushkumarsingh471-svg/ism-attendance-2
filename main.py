@@ -89,7 +89,6 @@ def init_tenant_db(user_id):
             applied_on TEXT
         )'''))
 
-        # DB Performance Indexes
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_sub_dt ON {t_attendance}(subject_id, date)'))
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_{safe_uid}_att_st_stat ON {t_attendance}(student_id, status)'))
 
@@ -151,9 +150,9 @@ def student_login(reg_no: str = Form(...), name: str = Form(...)):
 
     raise HTTPException(status_code=400, detail="Student not found. Please check your Registration No and exact Name spelling.")
 
-@app.get("/api/student_dashboard_data/{faculty_id}/{reg_no}")
+# Fixed Route Path to support Slashes in Registration Numbers (e.g. BCA/2026/01)
+@app.get("/api/student_dashboard_data/{faculty_id}/{reg_no:path}")
 def get_student_dashboard_data(faculty_id: str, reg_no: str):
-    # FIXED: Initialize tables for existing faculty accounts to prevent Crash
     init_tenant_db(faculty_id)
     
     safe_uid = get_safe_prefix(faculty_id)
@@ -202,8 +201,10 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 
         leaves_list = []
         try:
+            # FIX: DO NOT select 'doc_data' full base64 here. Just select if it exists to avoid crashing Vercel Limits.
             leaves_raw = conn.execute(text(f"""
-                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on, doc_name, doc_data 
+                SELECT id, leave_type, subject, from_date, to_date, reason, status, faculty_remark, applied_on, doc_name,
+                CASE WHEN doc_data IS NOT NULL AND doc_data != '' THEN 1 ELSE 0 END as has_doc
                 FROM {t_leaves} 
                 WHERE LOWER(reg_no)=LOWER(:r) 
                 ORDER BY id DESC
@@ -212,7 +213,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             leaves_list = [{
                 "id": l[0], "leave_type": l[1], "subject": l[2], "from_date": l[3], "to_date": l[4],
                 "reason": l[5], "status": l[6], "faculty_remark": l[7] or "", "applied_on": l[8],
-                "doc_name": l[9] or "", "doc_data": l[10] or ""
+                "doc_name": l[9] or "", "has_doc": bool(l[10])
             } for l in leaves_raw]
         except Exception:
             leaves_list = []
@@ -280,18 +281,40 @@ def get_faculty_leaves(user_id: str):
     safe_uid = get_safe_prefix(user_id)
     t_leaves = f"{safe_uid}_leaves"
     with engine.begin() as conn:
+        # FIX: Avoid fetching full base64 file data here to prevent Vercel crashes. Use has_doc instead.
         rows = conn.execute(text(f"""
-            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, doc_data, doc_name, status, faculty_remark, applied_on
+            SELECT id, reg_no, student_name, leave_type, subject, from_date, to_date, reason, doc_name, status, faculty_remark, applied_on,
+            CASE WHEN doc_data IS NOT NULL AND doc_data != '' THEN 1 ELSE 0 END as has_doc
             FROM {t_leaves}
             ORDER BY id DESC
         """)).fetchall()
 
         leaves = [{
             "id": r[0], "reg_no": r[1], "student_name": r[2], "leave_type": r[3], "subject": r[4],
-            "from_date": r[5], "to_date": r[6], "reason": r[7], "doc_data": r[8] or "",
-            "doc_name": r[9] or "", "status": r[10], "faculty_remark": r[11] or "", "applied_on": r[12]
+            "from_date": r[5], "to_date": r[6], "reason": r[7], "doc_name": r[8] or "", 
+            "status": r[9], "faculty_remark": r[10] or "", "applied_on": r[11], "has_doc": bool(r[12])
         } for r in rows]
     return {"leaves": leaves}
+
+# NEW API: Dedicated endpoint to View Huge PDF/Images without crashing the main Dashboard Load
+@app.get("/api/leave_doc/{user_id}/{leave_id}", response_class=HTMLResponse)
+def view_leave_doc(user_id: str, leave_id: int):
+    safe_uid = get_safe_prefix(user_id)
+    t_leaves = f"{safe_uid}_leaves"
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(f"SELECT doc_data FROM {t_leaves} WHERE id=:lid"), {"lid": leave_id}).fetchone()
+        
+        if not res or not res[0]:
+            return HTMLResponse("<h3 style='text-align:center; margin-top:20%; font-family:sans-serif; color:red;'>Document not found or removed.</h3>")
+        
+        doc_data = res[0]
+        if doc_data.startswith("data:application/pdf"):
+            return HTMLResponse(f'<body style="margin:0;"><iframe src="{doc_data}" width="100%" height="100%" style="border:none;"></iframe></body>')
+        else:
+            return HTMLResponse(f'<body style="margin:0; display:flex; justify-content:center; background:#1e293b;"><img src="{doc_data}" style="max-width:100%; max-height:100vh;"></body>')
+    except Exception as e:
+        return HTMLResponse(f"<h3>Error loading document: {str(e)}</h3>")
 
 @app.post("/api/update_leave_status")
 def update_leave_status(user_id: str = Form(...), leave_id: int = Form(...), status: str = Form(...), remark: str = Form("")):
@@ -778,7 +801,7 @@ def delete_all_students(user_id: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-@app.get("/api/student_details/{user_id}/{reg_no}")
+@app.get("/api/student_details/{user_id}/{reg_no:path}")
 def get_student_profile(user_id: str, reg_no: str):
     safe_uid = get_safe_prefix(user_id)
     t_details = f"{safe_uid}_student_details"
@@ -1407,7 +1430,7 @@ def home():
                 </div>
 
                 <div class="flex gap-4 mb-6">
-                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                    <a :href="'/api/download_table_excel/' + encodeURIComponent(userId) + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + encodeURIComponent(tableSubject)" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
                 </div>
 
                 <div class="mb-4">
@@ -1464,8 +1487,8 @@ def home():
                 </div>
 
                 <div class="flex gap-4 mb-6">
-                    <a :href="'/api/download_excel/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
-                    <a :href="'/api/download_pdf/' + userId + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
+                    <a :href="'/api/download_excel/' + encodeURIComponent(userId) + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📊 DOWNLOAD EXCEL (.XLSX)</a>
+                    <a :href="'/api/download_pdf/' + encodeURIComponent(userId) + '?month=' + reportMonth + '&year=' + reportYear" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition">📥 DOWNLOAD PDF (.PDF)</a>
                     <button @click="shareViaEmail()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-center shadow-lg transition flex justify-center items-center gap-2">🔗 SHARE PDF</button>
                 </div>
 
@@ -1652,8 +1675,8 @@ def home():
                                         </td>
                                         <td class="p-3 max-w-xs">
                                             <p class="text-xs text-slate-300 italic mb-1" x-text="leave.reason"></p>
-                                            <template x-if="leave.doc_data">
-                                                <a :href="leave.doc_data" :download="leave.doc_name || 'document.pdf'" target="_blank" class="inline-flex items-center gap-1 text-xs bg-emerald-950 border border-emerald-500 text-emerald-300 px-2 py-1 rounded font-bold hover:bg-emerald-900 transition">
+                                            <template x-if="leave.has_doc">
+                                                <a :href="'/api/leave_doc/' + encodeURIComponent(userId) + '/' + leave.id" target="_blank" class="inline-flex items-center gap-1 text-xs bg-emerald-950 border border-emerald-500 text-emerald-300 px-2 py-1 rounded font-bold hover:bg-emerald-900 transition">
                                                     📎 View Attached PDF/Doc
                                                 </a>
                                             </template>
@@ -1946,8 +1969,9 @@ def home():
 
                 <div>
                     <label class="block text-amber-400 font-bold text-xs mb-1">📎 Attach Medical Certificate / Proof (PDF or Image)</label>
-                    <input type="file" id="leaveDocFile" accept=".pdf,image/*" class="w-full p-2.5 rounded-xl text-sm bg-indigo-50">
-                    <p class="text-[11px] text-slate-400 mt-1">Upload doctor prescription, event pass or supporting slip for faster faculty approval.</p>
+                    <!-- FIX: 4MB Upload Restriction Added to prevent Payload Crashes -->
+                    <input type="file" id="leaveDocFile" accept=".pdf,image/*" onchange="if(this.files[0].size > 4000000){ alert('File size must be under 4MB'); this.value=''; }" class="w-full p-2.5 rounded-xl text-sm bg-indigo-50">
+                    <p class="text-[11px] text-slate-400 mt-1">Upload doctor prescription, event pass or supporting slip for faster faculty approval (Max 4MB).</p>
                 </div>
 
                 <div class="flex gap-4 pt-4 border-t border-slate-700">
@@ -2196,9 +2220,16 @@ def home():
                     }
                 },
 
+                // FIX: Added encodeURIComponent to prevent URL breaking if Registration No has slashes (/)
                 async loadStudentDashboard(fac_id, reg_no) {
                     try {
-                        let res = await fetch(`/api/student_dashboard_data/${fac_id}/${reg_no}`);
+                        let res = await fetch(`/api/student_dashboard_data/${encodeURIComponent(fac_id)}/${encodeURIComponent(reg_no)}`);
+                        if (!res.ok) {
+                            let err = await res.json();
+                            alert(err.detail || "Error loading dashboard data.");
+                            this.logout();
+                            return;
+                        }
                         let data = await res.json();
                         if (data.error) {
                             alert(data.error);
@@ -2207,7 +2238,7 @@ def home():
                             this.studentDashData = data;
                         }
                     } catch (e) {
-                        alert("Error loading dashboard data.");
+                        alert("Error loading dashboard data: " + e.message);
                     }
                 },
 
@@ -2262,7 +2293,7 @@ def home():
 
                 async loadFacultyLeaves() {
                     try {
-                        let res = await fetch(`/api/leaves/${this.userId}`);
+                        let res = await fetch(`/api/leaves/${encodeURIComponent(this.userId)}`);
                         let data = await res.json();
                         this.facultyLeaves = data.leaves || [];
                     } catch(e) {
@@ -2294,7 +2325,7 @@ def home():
 
                 async openDefaultersModal() {
                     try {
-                        let res = await fetch(`/api/defaulters/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&threshold=75.0`);
+                        let res = await fetch(`/api/defaulters/${encodeURIComponent(this.userId)}?month=${this.selectedMonth}&year=${this.selectedYear}&threshold=75.0`);
                         let data = await res.json();
                         this.defaulterData = data;
                         this.showDefaultersModal = true;
@@ -2305,7 +2336,7 @@ def home():
 
                 async loadData() {
                     try {
-                        let res = await fetch(`/api/data/${this.userId}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${this.selectedSubject}&target_date=${this.selectedDate}`);
+                        let res = await fetch(`/api/data/${encodeURIComponent(this.userId)}?month=${this.selectedMonth}&year=${this.selectedYear}&subject=${encodeURIComponent(this.selectedSubject)}&target_date=${this.selectedDate}`);
                         let data = await res.json();
                         this.collegeName = data.college_name;
                         this.appSubtitle = data.app_subtitle;
@@ -2328,7 +2359,7 @@ def home():
 
                 async loadTableData() {
                     if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
-                    let res = await fetch(`/api/attendance_table/${this.userId}?month=${this.tableMonth}&year=${this.tableYear}&subject=${this.tableSubject}`);
+                    let res = await fetch(`/api/attendance_table/${encodeURIComponent(this.userId)}?month=${this.tableMonth}&year=${this.tableYear}&subject=${encodeURIComponent(this.tableSubject)}`);
                     let data = await res.json();
                     this.tableNumDays = data.num_days;
                     this.tableRows = data.table_data;
@@ -2395,7 +2426,7 @@ def home():
                 },
 
                 async loadReportData() {
-                    let res = await fetch(`/api/compile_report/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`);
+                    let res = await fetch(`/api/compile_report/${encodeURIComponent(this.userId)}?month=${this.reportMonth}&year=${this.reportYear}`);
                     let data = await res.json();
                     this.reportSubjects = data.subjects;
                     this.reportRows = data.report;
@@ -2428,7 +2459,7 @@ def home():
                 async fetchStudentDetails() {
                     let reg = this.currentStudent.reg_no;
                     if (!reg) return;
-                    let res = await fetch(`/api/student_details/${this.userId}/${reg}`);
+                    let res = await fetch(`/api/student_details/${encodeURIComponent(this.userId)}/${encodeURIComponent(reg)}`);
                     let data = await res.json();
                     this.currentStudentDetails = data;
                     this.currentStudentPhoto = data.photo_data;
@@ -2671,7 +2702,7 @@ def home():
                 },
 
                 async shareViaEmail() {
-                    let pdfUrl = `/api/download_pdf/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`;
+                    let pdfUrl = `/api/download_pdf/${encodeURIComponent(this.userId)}?month=${this.reportMonth}&year=${this.reportYear}`;
                     let fileName = `Attendance_Report_${this.reportMonth}_${this.reportYear}.pdf`;
                     try {
                         let response = await fetch(pdfUrl);

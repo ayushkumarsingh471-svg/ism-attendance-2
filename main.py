@@ -6,10 +6,10 @@ import calendar
 from datetime import datetime, date
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP ")
+app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -1371,6 +1371,16 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
 # ==========================================
+# MANIFEST ENDPOINT (FOR PWA/INSTALL)
+# ==========================================
+@app.get("/manifest.json")
+def get_manifest():
+    if os.path.exists("manifest.json"):
+        return FileResponse("manifest.json", media_type="application/json")
+    return {"error": "manifest.json file not found in root directory"}
+
+
+# ==========================================
 # FRONTEND UI (COMPLETE & UNIFIED)
 # ==========================================
 
@@ -1382,6 +1392,14 @@ def home():
 <head>
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
+    
+    <!-- PWA Manifest Link -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#1e3a8a">
+    <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -1700,7 +1718,7 @@ def home():
                     <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search student in table..." class="w-full p-3 rounded-xl shadow">
                 </div>
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
-                    <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table">
+                    <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table border-collapse">
                         <thead>
                             <tr class="bg-blue-900 text-white">
                                 <th class="p-3 border sticky col-reg bg-blue-900 z-20">Reg No</th>

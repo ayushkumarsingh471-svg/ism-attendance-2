@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy import create_engine, text
 
-app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
+app = FastAPI(title="ISM Attendance ERP ")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -664,7 +664,6 @@ def download_defaulters_pdf(user_id: str, month: str = "July", year: int = 2026,
         Spacer(1, 12)
     ]
 
-    total_avail_width = 800
     col_widths = [60, 90, 310, 110, 100, 130] 
 
     t = RLTable(table_data, colWidths=col_widths, repeatRows=1)
@@ -1393,9 +1392,16 @@ def home():
         .glass-card { background: rgba(15, 23, 42, 0.75) !important; backdrop-filter: blur(8px); border: 2px solid rgba(56, 189, 248, 0.3); }
         input, select, textarea { background-color: #e0f2fe !important; color: #0f172a !important; border: 2px solid #38bdf8 !important; font-weight: 800 !important; }
         input::placeholder, textarea::placeholder { color: #64748b !important; }
-        .math-grid-table th, .math-grid-table td { border: 2px solid #38bdf8 !important; }
-        .math-grid-table th:nth-child(3), .math-grid-table td:nth-child(3) { min-width: 320px !important; text-align: left !important; padding-left: 14px !important; }
-        .math-grid-table td:not(:nth-child(3)):not(:nth-child(1)):not(:nth-child(2)) { width: 34px !important; height: 34px !important; min-width: 34px !important; max-width: 34px !important; padding: 2px !important; font-size: 11px !important; }
+        
+        /* Fixed Grid Table styling */
+        .math-grid-table { border-collapse: separate !important; border-spacing: 0 !important; }
+        .math-grid-table th, .math-grid-table td { border: 1px solid #38bdf8 !important; }
+        
+        .col-reg { width: 110px !important; min-width: 110px !important; max-width: 110px !important; left: 0px !important; }
+        .col-roll { width: 60px !important; min-width: 60px !important; max-width: 60px !important; left: 110px !important; }
+        .col-name { width: 260px !important; min-width: 260px !important; max-width: 260px !important; left: 170px !important; text-align: left !important; padding-left: 10px !important; }
+        
+        .day-cell { width: 34px !important; min-width: 34px !important; max-width: 34px !important; height: 34px !important; padding: 0 !important; font-size: 11px !important; }
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #38bdf8; border-radius: 4px; }
@@ -1694,29 +1700,31 @@ def home():
                     <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search student in table..." class="w-full p-3 rounded-xl shadow">
                 </div>
                 <div class="bg-sky-100 rounded-xl overflow-x-auto border-2 border-sky-400 shadow-2xl">
-                    <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table border-collapse">
+                    <table class="w-full text-slate-900 font-bold text-sm text-center math-grid-table">
                         <thead>
                             <tr class="bg-blue-900 text-white">
-                                <th class="p-3 border sticky left-0 bg-blue-900 z-10 w-28">Reg No</th>
-                                <th class="p-3 border sticky left-28 bg-blue-900 z-10 w-16">Roll</th>
-                                <th class="p-3 border text-left sticky left-44 bg-blue-900 z-10 w-80">Student Name</th>
-                                <template x-for="d in tableNumDays"><th class="p-1 border text-xs w-8 h-8" x-text="d"></th></template>
-                                <th class="p-3 border w-16">%</th>
+                                <th class="p-3 border sticky col-reg bg-blue-900 z-20">Reg No</th>
+                                <th class="p-3 border sticky col-roll bg-blue-900 z-20">Roll</th>
+                                <th class="p-3 border sticky col-name bg-blue-900 z-20">Student Name</th>
+                                <template x-for="d in tableNumDays">
+                                    <th class="border text-xs day-cell bg-blue-900 text-white" x-text="d"></th>
+                                </template>
+                                <th class="p-3 border w-16 bg-blue-900 text-white">%</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <template x-for="st in filteredTableRows">
+                            <template x-for="st in filteredTableRows" :key="st.id">
                                 <tr class="bg-sky-50 hover:bg-sky-200">
-                                    <td class="p-3 border sticky left-0 bg-sky-50 z-10" x-text="st.reg_no"></td>
-                                    <td class="p-3 border sticky left-28 bg-sky-50 z-10" x-text="st.roll_no"></td>
-                                    <td class="p-3 border text-left sticky left-44 bg-sky-50 z-10 truncate" x-text="st.name"></td>
-                                    <template x-for="d in tableNumDays">
-                                        <td class="border text-xs text-center cursor-pointer select-none" 
+                                    <td class="p-2 border sticky col-reg bg-sky-50 z-10 font-mono text-xs" x-text="st.reg_no"></td>
+                                    <td class="p-2 border sticky col-roll bg-sky-50 z-10 font-mono text-xs" x-text="st.roll_no"></td>
+                                    <td class="p-2 border sticky col-name bg-sky-50 z-10 truncate font-semibold" x-text="st.name"></td>
+                                    <template x-for="d in tableNumDays" :key="d">
+                                        <td class="border day-cell text-center cursor-pointer select-none" 
                                             :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black' : 'hover:bg-sky-200')" 
                                             x-text="st.days[d]"
                                             @click="toggleCellAttendance(st, d)"></td>
                                     </template>
-                                    <td class="p-3 border font-black text-blue-800" x-text="st.pct + '%'"></td>
+                                    <td class="p-2 border font-black text-blue-800" x-text="st.pct + '%'"></td>
                                 </tr>
                             </template>
                         </tbody>
@@ -1830,7 +1838,7 @@ def home():
                     <button @click="loadFacultyLeaves()" :disabled="isProcessing" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
                 </div>
                 
-                <!-- NEW SEARCH BAR FOR LEAVES -->
+                <!-- SEARCH BAR FOR LEAVES -->
                 <div class="mb-6">
                     <input type="text" x-model="leaveSearchQuery" placeholder="🔍 Search applications by Student Name or Reg No..." class="w-full p-3 rounded-xl shadow border-2 border-indigo-400/30 bg-slate-900 text-white font-bold text-sm focus:border-indigo-500">
                 </div>
@@ -2822,7 +2830,6 @@ def home():
                     }
                 },
                 
-                // Helper Function For Native Sharing Mobile/Desktop
                 async shareFileNative(pdfUrl, fileName, titleText) {
                     try {
                         if (navigator.share && navigator.canShare) {
@@ -2839,7 +2846,6 @@ def home():
                                 return;
                             }
                         }
-                        // Fallback if browser doesn't support sharing files
                         alert("Native sharing is not supported on this browser. Downloading instead...");
                         let a = document.createElement('a');
                         a.href = pdfUrl;

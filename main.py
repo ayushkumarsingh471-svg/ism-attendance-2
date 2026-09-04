@@ -1423,6 +1423,10 @@ def home():
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #38bdf8; border-radius: 4px; }
+        
+        /* Sliding Blade Animation Styles */
+        .blade-faculty { transform: translateX(-150%) skewX(-20deg); }
+        .blade-student { transform: translateX(110%) skewX(-20deg); }
     </style>
 </head>
 <body x-data="erpApp()">
@@ -1462,53 +1466,68 @@ def home():
                 </div>
             </div>
 
-            <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl">
-                <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700">
-                    <button @click="authRole = 'faculty'; isLogin = true" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
-                    <button @click="authRole = 'student'" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
+            <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl relative overflow-hidden">
+                <!-- Navigation Tabs -->
+                <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700 relative z-30">
+                    <button @click="authRole = 'faculty'; isLogin = true; authError = ''" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
+                    <button @click="authRole = 'student'; authError = ''" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
                 </div>
 
-                <!-- FACULTY FORM -->
-                <div x-show="authRole === 'faculty'">
-                    <div class="flex gap-2 mb-6 bg-slate-800 p-1 rounded-xl">
-                        <button @click="isLogin = true" :class="isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">🔐 Login</button>
-                        <button @click="isLogin = false" :class="!isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">📄 Register Class</button>
+                <!-- Animated Slider Container -->
+                <div class="relative min-h-[340px]">
+                    
+                    <!-- Sliding Blade Overlay -->
+                    <div class="absolute top-[-20%] bottom-[-20%] w-[150%] bg-gradient-to-r from-sky-500 to-blue-700 z-20 transition-transform duration-700 ease-in-out shadow-[0_0_30px_rgba(14,165,233,0.8)] pointer-events-none"
+                         :class="authRole === 'faculty' ? 'blade-faculty' : 'blade-student'"></div>
+
+                    <!-- FACULTY FORM -->
+                    <div class="absolute inset-0 w-full transition-all duration-300"
+                         :class="authRole === 'faculty' ? 'opacity-100 z-10 pointer-events-auto delay-200' : 'opacity-0 z-0 pointer-events-none'">
+                        
+                        <div class="flex gap-2 mb-6 bg-slate-800 p-1 rounded-xl">
+                            <button @click="isLogin = true" :class="isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">🔐 Login</button>
+                            <button @click="isLogin = false" :class="!isLogin ? 'bg-sky-500 text-white shadow' : 'text-slate-400'" class="flex-1 py-1.5 font-bold rounded-lg transition text-xs">📄 Register Class</button>
+                        </div>
+                        <form @submit.prevent="submitAuth" class="space-y-4">
+                            <div>
+                                <label class="block text-sky-400 font-bold text-xs mb-1">Faculty ID / Class Code</label>
+                                <input type="text" x-model="authForm.username" placeholder="Enter Faculty ID" required class="w-full p-3 rounded-xl text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sky-400 font-bold text-xs mb-1">Password</label>
+                                <input type="password" x-model="authForm.password" placeholder="Enter Password" required class="w-full p-3 rounded-xl text-sm">
+                            </div>
+                            <button type="submit" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2 mt-4">
+                                <span x-show="isProcessing">⏳ Please wait...</span>
+                                <span x-show="!isProcessing" x-text="isLogin ? 'FACULTY LOGIN' : 'CREATE CLASS PORTAL'"></span>
+                            </button>
+                        </form>
                     </div>
-                    <form @submit.prevent="submitAuth" class="space-y-4">
-                        <div>
-                            <label class="block text-sky-400 font-bold text-xs mb-1">Faculty ID / Class Code</label>
-                            <input type="text" x-model="authForm.username" placeholder="Enter Faculty ID" required class="w-full p-3 rounded-xl text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-sky-400 font-bold text-xs mb-1">Password</label>
-                            <input type="password" x-model="authForm.password" placeholder="Enter Password" required class="w-full p-3 rounded-xl text-sm">
-                        </div>
-                        <button type="submit" :disabled="isProcessing" class="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2">
-                            <span x-show="isProcessing">⏳ Please wait...</span>
-                            <span x-show="!isProcessing" x-text="isLogin ? 'FACULTY LOGIN' : 'CREATE CLASS PORTAL'"></span>
-                        </button>
-                    </form>
+
+                    <!-- STUDENT FORM -->
+                    <div class="absolute inset-0 w-full transition-all duration-300"
+                         :class="authRole === 'student' ? 'opacity-100 z-10 pointer-events-auto delay-200' : 'opacity-0 z-0 pointer-events-none'">
+                        
+                        <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Enter your registered details to view reports</p>
+                        <form @submit.prevent="submitStudentAuth" class="space-y-4">
+                            <div>
+                                <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
+                                <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
+                                <input type="text" x-model="studentForm.name" placeholder="Enter your full name" required class="w-full p-3 rounded-xl text-sm">
+                            </div>
+                            <button type="submit" :disabled="isProcessing" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2 mt-6">
+                                <span x-show="isProcessing">⏳ Loading Profile...</span>
+                                <span x-show="!isProcessing">ACCESS STUDENT DASHBOARD</span>
+                            </button>
+                        </form>
+                    </div>
+
                 </div>
 
-                <!-- STUDENT FORM -->
-                <div x-show="authRole === 'student'">
-                    <p class="text-emerald-400 text-xs font-bold mb-4 text-center">Enter your registered details to view reports</p>
-                    <form @submit.prevent="submitStudentAuth" class="space-y-4">
-                        <div>
-                            <label class="block text-emerald-400 font-bold text-xs mb-1">Registration No.</label>
-                            <input type="text" x-model="studentForm.reg_no" placeholder="Enter your Reg No." required class="w-full p-3 rounded-xl text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-emerald-400 font-bold text-xs mb-1">Student Full Name</label>
-                            <input type="text" x-model="studentForm.name" placeholder="Enter your full name" required class="w-full p-3 rounded-xl text-sm">
-                        </div>
-                        <button type="submit" :disabled="isProcessing" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow-lg transition text-sm flex justify-center items-center gap-2">
-                            <span x-show="isProcessing">⏳ Loading Profile...</span>
-                            <span x-show="!isProcessing">ACCESS STUDENT DASHBOARD</span>
-                        </button>
-                    </form>
-                </div>
-                <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4"></p>
+                <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4 relative z-30 min-h-[20px]"></p>
             </div>
         </div>
     </div>
@@ -2905,5 +2924,4 @@ def home():
         }
     </script>
 </body>
-</html>
-"""
+</html>"""

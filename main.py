@@ -1379,11 +1379,6 @@ def get_manifest():
         return FileResponse("manifest.json", media_type="application/json")
     return {"error": "manifest.json file not found in root directory"}
 
-@app.get("/icon.png")
-def get_icon():
-    if os.path.exists("icon.png"):
-        return FileResponse("icon.png", media_type="image/png")
-    return {"error": "icon.png file not found in root directory"}
 
 # ==========================================
 # FRONTEND UI (COMPLETE & UNIFIED)
@@ -1401,7 +1396,7 @@ def home():
     <!-- PWA Manifest Link -->
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#1e3a8a">
-    <link rel="apple-touch-icon" href="/icon.png">
+    <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
 
@@ -2929,4 +2924,4 @@ def home():
         }
     </script>
 </body>
-</html>
+</html>"""

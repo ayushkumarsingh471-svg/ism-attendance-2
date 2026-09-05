@@ -1983,9 +1983,20 @@ def home():
                             <button type="submit" :disabled="isProcessing" class="w-full bg-blue-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Save Profile</button>
                         </form>
                     </div>
-                    <div class="glass-card p-6 rounded-2xl col-span-2 border-2 border-red-500/50">
-                        <h3 class="text-xl font-black text-red-400 mb-2">⚠️ Delete All Students</h3>
-                        <button @click="deleteAllStudents" :disabled="isProcessing" class="w-full bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-black py-3 rounded-xl shadow">Delete All Students & Data Forever</button>
+                    <div class="glass-card p-6 rounded-2xl border-2 border-red-400/50">
+                        <h3 class="text-xl font-black text-red-400 mb-4">🗑️ Delete Single Student</h3>
+                        <form @submit.prevent="deleteStudent" class="space-y-3">
+                            <select x-model="delRegNo" class="w-full p-2.5 rounded-xl text-slate-900 text-sm" required>
+                                <option value="">--- Select Student ---</option>
+                                <template x-for="st in students"><option :value="st.reg_no" x-text="st.reg_no + ' - ' + st.name"></option></template>
+                            </select>
+                            <button type="submit" :disabled="isProcessing || !delRegNo" class="w-full bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow">Delete Student</button>
+                        </form>
+                    </div>
+                    <div class="glass-card p-6 rounded-2xl border-2 border-red-500/50">
+                        <h3 class="text-xl font-black text-red-400 mb-4">⚠️ Delete All Students</h3>
+                        <p class="text-sm text-slate-300 mb-4">Warning: This action will permanently remove all students, attendance, and leave records from your class portal.</p>
+                        <button @click="deleteAllStudents" :disabled="isProcessing" class="w-full bg-red-800 hover:bg-red-900 border border-red-500 disabled:opacity-50 text-white font-black py-2.5 rounded-xl shadow mt-1">Delete All Students & Data</button>
                     </div>
                 </div>
             </div>

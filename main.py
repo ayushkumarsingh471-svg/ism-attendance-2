@@ -1107,10 +1107,19 @@ def add_student(user_id: str = Form(...), reg_no: str = Form(...), roll_no: str 
 def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
     try:
         safe_uid = get_safe_prefix(user_id)
-        t_students = f"{safe_uid}_students"
+        r = reg_no.strip()
         with engine.begin() as conn:
-            conn.execute(text(f"DELETE FROM {t_students} WHERE reg_no=:r"), {"r": reg_no.strip()})
-        return {"success": True, "message": "Student deleted successfully!"}
+            # 1. Find student ID to safely delete their attendance logs
+            s_res = conn.execute(text(f"SELECT id FROM {safe_uid}_students WHERE reg_no=:r"), {"r": r}).fetchone()
+            if s_res:
+                conn.execute(text(f"DELETE FROM {safe_uid}_attendance WHERE student_id=:sid"), {"sid": s_res[0]})
+            
+            # 2. Delete from profile details, leaves, and the main student table
+            conn.execute(text(f"DELETE FROM {safe_uid}_student_details WHERE reg_no=:r"), {"r": r})
+            conn.execute(text(f"DELETE FROM {safe_uid}_leaves WHERE reg_no=:r"), {"r": r})
+            conn.execute(text(f"DELETE FROM {safe_uid}_students WHERE reg_no=:r"), {"r": r})
+            
+        return {"success": True, "message": "Single student deleted successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 

@@ -22,7 +22,7 @@ if not DATABASE_URL:
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Optimization: Removed NullPool. Utilizing standard QueuePool for massive speed increases on database hits.
+# Optimization: Utilizing standard QueuePool for massive speed increases on database hits.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=30)
 
 def init_master_db():

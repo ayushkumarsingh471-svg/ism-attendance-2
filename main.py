@@ -202,7 +202,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             ORDER BY a.date DESC
         """), {"sid": st_id}).fetchall()
 
-        history = [{"subject": r[0], "date": r[1], "status": r[2]} for r in recent_records]
+        history = [{"subject": r[0], "date": r[1].split('#')[0], "status": r[2]} for r in recent_records]
 
         leaves = []
         try:
@@ -346,6 +346,7 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
 
     month_num = list(calendar.month_name).index(month) if month in list(calendar.month_name) else 7
     date_pattern = f"{year}-{month_num:02d}-%"
+    target_dt_pattern = f"{target_date}%"
 
     with engine.begin() as conn:
         total_students = conn.execute(text(f"SELECT COUNT(id) FROM {t_students}")).fetchone()[0] or 0
@@ -359,7 +360,7 @@ def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subj
         present_today = 0
         if sub_id:
             tc_count = conn.execute(text(f"SELECT COUNT(DISTINCT date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :d"), {"sid": sub_id, "d": date_pattern}).fetchone()[0] or 0
-            present_today = conn.execute(text(f"SELECT COUNT(date) FROM {t_attendance} WHERE subject_id=:sid AND date=:dt AND status='Present'"), {"sid": sub_id, "dt": target_date}).fetchone()[0] or 0
+            present_today = conn.execute(text(f"SELECT COUNT(date) FROM {t_attendance} WHERE subject_id=:sid AND date LIKE :dt AND status='Present'"), {"sid": sub_id, "dt": target_dt_pattern}).fetchone()[0] or 0
 
         students_raw = conn.execute(text(f"SELECT id, reg_no, roll_no, name FROM {t_students}")).fetchall()
         students = sort_students_safely(students_raw)
@@ -429,11 +430,11 @@ def get_absentees_list(user_id: str, subject: str = "BE", date_str: str = ""):
         sub_id = sub_id_res[0]
 
         absentees_raw = conn.execute(text(f"""
-            SELECT s.reg_no, s.roll_no, s.name
+            SELECT DISTINCT s.reg_no, s.roll_no, s.name
             FROM {t_students} s
             JOIN {t_attendance} a ON s.id = a.student_id
-            WHERE a.subject_id = :sid AND a.date = :dt AND a.status = 'Absent'
-        """), {"sid": sub_id, "dt": date_str}).fetchall()
+            WHERE a.subject_id = :sid AND a.date LIKE :dt AND a.status = 'Absent'
+        """), {"sid": sub_id, "dt": f"{date_str}%"}).fetchall()
 
         absentees = [{"reg_no": r[0], "roll_no": r[1], "name": r[2]} for r in absentees_raw]
         
@@ -472,11 +473,11 @@ def download_absentees_pdf(user_id: str, subject: str = "BE", date_str: str = ""
         absentees = []
         if sub_id and date_str:
             absentees_raw = conn.execute(text(f"""
-                SELECT s.roll_no, s.reg_no, s.name
+                SELECT DISTINCT s.roll_no, s.reg_no, s.name
                 FROM {t_students} s
                 JOIN {t_attendance} a ON s.id = a.student_id
-                WHERE a.subject_id = :sid AND a.date = :dt AND a.status = 'Absent'
-            """), {"sid": sub_id, "dt": date_str}).fetchall()
+                WHERE a.subject_id = :sid AND a.date LIKE :dt AND a.status = 'Absent'
+            """), {"sid": sub_id, "dt": f"{date_str}%"}).fetchall()
             
             def safe_roll(x):
                 try:
@@ -709,9 +710,10 @@ def get_attendance_table(user_id: str, month: str = "July", year: int = 2026, su
 
             for r_no, d_str, stat in records:
                 try:
-                    day_idx = int(d_str.split('-')[2])
+                    day_idx = int(d_str.split('-')[2].split('#')[0])
                     if r_no not in att_map: att_map[r_no] = {}
-                    att_map[r_no][day_idx] = 'P' if stat == 'Present' else 'A'
+                    if day_idx not in att_map[r_no]: att_map[r_no][day_idx] = []
+                    att_map[r_no][day_idx].append('P' if stat == 'Present' else 'A')
                 except Exception:
                     pass
 
@@ -721,9 +723,24 @@ def get_attendance_table(user_id: str, month: str = "July", year: int = 2026, su
             days_data = {}
             total_p = 0
             for d in range(1, num_days + 1):
-                val = att_map.get(reg, {}).get(d, "")
+                vals = att_map.get(reg, {}).get(d, [])
+                if not vals:
+                    val = ""
+                elif len(vals) == 1:
+                    val = vals[0]
+                else:
+                    p_c = vals.count('P')
+                    a_c = vals.count('A')
+                    if p_c > 0 and a_c == 0:
+                        val = f"P{p_c}x"
+                    elif a_c > 0 and p_c == 0:
+                        val = f"A{a_c}x"
+                    else:
+                        val = f"P{p_c}A{a_c}"
+                        
                 days_data[d] = val
-                if val == 'P': total_p += 1
+                total_p += vals.count('P')
+                
             pct = round((total_p / tc_count * 100)) if tc_count > 0 else 0
             result.append({"id": s_id, "reg_no": reg, "roll_no": roll, "name": name, "days": days_data, "pct": pct})
 
@@ -759,9 +776,10 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
 
             for r_no, d_str, stat in records:
                 try:
-                    day_idx = int(d_str.split('-')[2])
+                    day_idx = int(d_str.split('-')[2].split('#')[0])
                     if r_no not in att_map: att_map[r_no] = {}
-                    att_map[r_no][day_idx] = 'P' if stat == 'Present' else 'A'
+                    if day_idx not in att_map[r_no]: att_map[r_no][day_idx] = []
+                    att_map[r_no][day_idx].append('P' if stat == 'Present' else 'A')
                 except Exception:
                     pass
 
@@ -771,9 +789,24 @@ def download_table_excel(user_id: str, month: str = "July", year: int = 2026, su
             row = {"Registration No": reg, "Roll No": roll, "Student Name": name}
             total_p = 0
             for d in range(1, num_days + 1):
-                val = att_map.get(reg, {}).get(d, "")
+                vals = att_map.get(reg, {}).get(d, [])
+                if not vals:
+                    val = ""
+                elif len(vals) == 1:
+                    val = vals[0]
+                else:
+                    p_c = vals.count('P')
+                    a_c = vals.count('A')
+                    if p_c > 0 and a_c == 0:
+                        val = f"P{p_c}x"
+                    elif a_c > 0 and p_c == 0:
+                        val = f"A{a_c}x"
+                    else:
+                        val = f"P{p_c}A{a_c}"
+                        
                 row[str(d)] = val
-                if val == 'P': total_p += 1
+                total_p += vals.count('P')
+                
             pct = round((total_p / tc_count * 100)) if tc_count > 0 else 0
             row["Overall %"] = f"{pct}%"
             data.append(row)
@@ -972,7 +1005,14 @@ def download_pdf(user_id: str, month: str = "July", year: int = 2026):
     return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Attendance_Report_{month}_{year}.pdf"})
 
 @app.post("/api/mark_attendance")
-def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subject: str = Form(...), date_str: str = Form(...), status: str = Form(...)):
+def mark_attendance(
+    user_id: str = Form(...), 
+    student_id: int = Form(...), 
+    subject: str = Form(...), 
+    date_str: str = Form(...), 
+    status: str = Form(...),
+    multiplier: int = Form(1)
+):
     try:
         safe_uid = get_safe_prefix(user_id)
         t_subjects = f"{safe_uid}_subjects"
@@ -983,16 +1023,17 @@ def mark_attendance(user_id: str = Form(...), student_id: int = Form(...), subje
             if not sub_id_res: raise HTTPException(status_code=400, detail="Subject not found.")
             sub_id = sub_id_res[0]
 
-            if status == 'Clear':
-                conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid AND date=:dt"), 
-                             {"sid": student_id, "subid": sub_id, "dt": date_str})
-            else:
-                conn.execute(text(f"""
-                    INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
-                    VALUES (:sid, :subid, :dt, :stat) 
-                    ON CONFLICT (student_id, subject_id, date) 
-                    DO UPDATE SET status = :stat
-                """), {"sid": student_id, "subid": sub_id, "dt": date_str, "stat": status})
+            dt_pattern = f"{date_str}%"
+            conn.execute(text(f"DELETE FROM {t_attendance} WHERE student_id=:sid AND subject_id=:subid AND date LIKE :dt"), 
+                         {"sid": student_id, "subid": sub_id, "dt": dt_pattern})
+
+            if status != 'Clear':
+                for i in range(multiplier):
+                    dt_insert = date_str if multiplier == 1 else f"{date_str}#{i+1}"
+                    conn.execute(text(f"""
+                        INSERT INTO {t_attendance} (student_id, subject_id, date, status) 
+                        VALUES (:sid, :subid, :dt, :stat) 
+                    """), {"sid": student_id, "subid": sub_id, "dt": dt_insert, "stat": status})
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
@@ -1024,12 +1065,13 @@ def reset_attendance(user_id: str = Form(...), scope: str = Form(...), reg_no: s
                     if sub_res:
                         conn.execute(text(f"DELETE FROM {t_attendance} WHERE subject_id=:subid"), {"subid": sub_res[0]})
             elif scope == "date" and date_str:
+                dt_pattern = f"{date_str}%"
                 if subject == "All Subjects":
-                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt"), {"dt": date_str})
+                    conn.execute(text(f"DELETE FROM {t_attendance} WHERE date LIKE :dt"), {"dt": dt_pattern})
                 else:
                     sub_res = conn.execute(text(f"SELECT id FROM {t_subjects} WHERE subject_name=:s"), {"s": subject}).fetchone()
                     if sub_res:
-                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE date=:dt AND subject_id=:subid"), {"subid": sub_res[0]})
+                        conn.execute(text(f"DELETE FROM {t_attendance} WHERE date LIKE :dt AND subject_id=:subid"), {"dt": dt_pattern, "subid": sub_res[0]})
         return {"success": True, "message": "Attendance logs reset executed successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
@@ -1109,12 +1151,10 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
         safe_uid = get_safe_prefix(user_id)
         r = reg_no.strip()
         with engine.begin() as conn:
-            # 1. Find student ID to safely delete their attendance logs
             s_res = conn.execute(text(f"SELECT id FROM {safe_uid}_students WHERE reg_no=:r"), {"r": r}).fetchone()
             if s_res:
                 conn.execute(text(f"DELETE FROM {safe_uid}_attendance WHERE student_id=:sid"), {"sid": s_res[0]})
             
-            # 2. Delete from profile details, leaves, and the main student table
             conn.execute(text(f"DELETE FROM {safe_uid}_student_details WHERE reg_no=:r"), {"r": r})
             conn.execute(text(f"DELETE FROM {safe_uid}_leaves WHERE reg_no=:r"), {"r": r})
             conn.execute(text(f"DELETE FROM {safe_uid}_students WHERE reg_no=:r"), {"r": r})
@@ -1238,7 +1278,7 @@ async def import_attendance(user_id: str = Form(...), file: UploadFile = File(..
                 mapped_name = orig_col
 
         try:
-            target_day = str(int(date_str.split('-')[2]))
+            target_day = str(int(date_str.split('-')[2].split('#')[0]))
             if target_day in cols:
                 mapped_att = target_day
             elif int(target_day) in cols:
@@ -1379,9 +1419,6 @@ async def save_student_profile(user_id: str = Form(...), reg_no: str = Form(...)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Server Error: " + str(e))
 
-# ==========================================
-# MANIFEST ENDPOINT (FOR PWA/INSTALL)
-# ==========================================
 @app.get("/manifest.json")
 def get_manifest():
     if os.path.exists("manifest.json"):
@@ -1402,7 +1439,6 @@ def home():
     <meta charset="UTF-8">
     <title>ISM Attendance ERP - Final Full Edition</title>
     
-    <!-- PWA Manifest Link -->
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#1e3a8a">
     <link rel="apple-touch-icon" href="https://i.ibb.co/3s68K1v/tree-logo.png">
@@ -1420,7 +1456,6 @@ def home():
         input, select, textarea { background-color: #e0f2fe !important; color: #0f172a !important; border: 2px solid #38bdf8 !important; font-weight: 800 !important; }
         input::placeholder, textarea::placeholder { color: #64748b !important; }
         
-        /* Fixed Grid Table styling */
         .math-grid-table { border-collapse: separate !important; border-spacing: 0 !important; }
         .math-grid-table th, .math-grid-table td { border: 1px solid #38bdf8 !important; }
         
@@ -1433,7 +1468,6 @@ def home():
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #38bdf8; border-radius: 4px; }
         
-        /* Sliding Blade Animation Styles */
         .blade-faculty { transform: translateX(-150%) skewX(-20deg); }
         .blade-student { transform: translateX(110%) skewX(-20deg); }
     </style>
@@ -1476,16 +1510,12 @@ def home():
             </div>
 
             <div class="bg-slate-900/90 p-8 rounded-2xl border border-sky-400/30 shadow-2xl relative overflow-hidden">
-                <!-- Navigation Tabs -->
                 <div class="flex gap-2 mb-6 bg-slate-950 p-1.5 rounded-xl border border-slate-700 relative z-30">
                     <button @click="authRole = 'faculty'; isLogin = true; authError = ''" :class="authRole === 'faculty' ? 'bg-blue-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">👨‍🏫 FACULTY</button>
                     <button @click="authRole = 'student'; authError = ''" :class="authRole === 'student' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400'" class="flex-1 py-3 font-black rounded-lg transition text-sm">🎓 STUDENT</button>
                 </div>
 
-                <!-- Animated Slider Container -->
                 <div class="relative min-h-[340px]">
-                    
-                    <!-- Sliding Blade Overlay -->
                     <div class="absolute top-[-20%] bottom-[-20%] w-[150%] bg-gradient-to-r from-sky-500 to-blue-700 z-20 transition-transform duration-700 ease-in-out shadow-[0_0_30px_rgba(14,165,233,0.8)] pointer-events-none"
                          :class="authRole === 'faculty' ? 'blade-faculty' : 'blade-student'"></div>
 
@@ -1533,7 +1563,6 @@ def home():
                             </button>
                         </form>
                     </div>
-
                 </div>
 
                 <p x-text="authError" class="text-red-400 text-center text-xs font-bold mt-4 relative z-30 min-h-[20px]"></p>
@@ -1678,11 +1707,26 @@ def home():
 
             <!-- MARK ATTENDANCE TAB -->
             <div x-show="currentTab === 'mark'">
-                <div class="grid grid-cols-4 gap-4 mb-6">
+                <div class="grid grid-cols-4 gap-4 mb-4">
                     <select x-model="selectedMonth" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="m in months"><option :value="m" :selected="m == selectedMonth" x-text="m"></option></template></select>
                     <select x-model="selectedYear" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="y in years"><option :value="y" :selected="y == selectedYear" x-text="y"></option></template></select>
                     <select x-model="selectedSubject" @change="loadData()" class="w-full p-2.5 rounded-xl"><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                     <input type="date" x-model="selectedDate" @change="syncFromDate(); loadData()" class="w-full p-2.5 rounded-xl">
+                </div>
+
+                <!-- MULTI-CLASS SWITCHER -->
+                <div class="glass-card p-4 rounded-xl border-2 border-emerald-500/50 flex items-center justify-between mb-6 bg-slate-900/80">
+                    <div class="flex items-center gap-3">
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" x-model="multiClassMode" class="sr-only peer">
+                            <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+                        <span class="text-white font-black text-sm uppercase tracking-wide">Multi-Class Mode (Double/Triple Class)</span>
+                    </div>
+                    <div x-show="multiClassMode" class="flex items-center gap-3">
+                        <label class="text-emerald-400 font-bold text-xs uppercase">No of Classes:</label>
+                        <input type="number" min="2" max="10" x-model="multiClassCount" class="w-20 p-2 rounded-xl text-sm bg-emerald-50 text-slate-900 font-black border-2 border-emerald-400 text-center">
+                    </div>
                 </div>
 
                 <div class="grid grid-cols-2 gap-8 items-start" x-show="students.length > 0">
@@ -1739,9 +1783,26 @@ def home():
                     <select x-model="tableYear" @change="loadTableData()" class="w-full p-2.5 rounded-xl"><template x-for="y in years"><option :value="y" :selected="y == tableYear" x-text="y"></option></template></select>
                     <select x-model="tableSubject" @change="loadTableData()" class="w-full p-2.5 rounded-xl"><template x-for="sub in subjects"><option :value="sub" x-text="sub"></option></template></select>
                 </div>
-                <div class="flex gap-4 mb-4">
-                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                
+                <div class="flex flex-col md:flex-row gap-4 mb-4">
+                    <a :href="'/api/download_table_excel/' + userId + '?month=' + tableMonth + '&year=' + tableYear + '&subject=' + tableSubject" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl text-center shadow flex items-center justify-center">📊 DOWNLOAD THIS TABLE TO EXCEL (.XLSX)</a>
+                    
+                    <!-- TABLE MULTI-CLASS SWITCH -->
+                    <div class="glass-card px-4 py-2 rounded-xl border-2 border-purple-500/50 flex items-center justify-between bg-slate-900/80 w-full md:w-auto min-w-[350px]">
+                        <div class="flex items-center gap-3">
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" x-model="tableMultiClassMode" class="sr-only peer">
+                                <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-500"></div>
+                            </label>
+                            <span class="text-white font-black text-xs uppercase tracking-wide">Multi-Class Edit</span>
+                        </div>
+                        <div x-show="tableMultiClassMode" class="flex items-center gap-2">
+                            <label class="text-purple-400 font-bold text-[10px] uppercase">Classes:</label>
+                            <input type="number" min="2" max="10" x-model="tableMultiClassCount" class="w-16 p-1.5 rounded-lg text-xs bg-purple-50 text-slate-900 font-black border-2 border-purple-400 text-center">
+                        </div>
+                    </div>
                 </div>
+
                 <div class="mb-4">
                     <input type="text" x-model="tableSearchQuery" placeholder="🔍 Search student in table..." class="w-full p-3 rounded-xl shadow">
                 </div>
@@ -1766,7 +1827,7 @@ def home():
                                     <td class="p-2 border sticky col-name bg-sky-50 z-10 truncate font-semibold" x-text="st.name"></td>
                                     <template x-for="d in tableNumDays" :key="d">
                                         <td class="border day-cell text-center cursor-pointer select-none" 
-                                            :class="st.days[d] === 'P' ? 'bg-emerald-500 text-white font-black' : (st.days[d] === 'A' ? 'bg-red-500 text-white font-black' : 'hover:bg-sky-200')" 
+                                            :class="st.days[d].includes('P') && !st.days[d].includes('A') ? 'bg-emerald-500 text-white font-black' : (st.days[d].includes('A') && !st.days[d].includes('P') ? 'bg-red-500 text-white font-black' : (st.days[d].includes('P') && st.days[d].includes('A') ? 'bg-amber-500 text-white font-black' : 'hover:bg-sky-200'))" 
                                             x-text="st.days[d]"
                                             @click="toggleCellAttendance(st, d)"></td>
                                     </template>
@@ -1884,7 +1945,6 @@ def home():
                     <button @click="loadFacultyLeaves()" :disabled="isProcessing" class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-xl text-xs shadow">🔄 Refresh</button>
                 </div>
                 
-                <!-- SEARCH BAR FOR LEAVES -->
                 <div class="mb-6">
                     <input type="text" x-model="leaveSearchQuery" placeholder="🔍 Search applications by Student Name or Reg No..." class="w-full p-3 rounded-xl shadow border-2 border-indigo-400/30 bg-slate-900 text-white font-bold text-sm focus:border-indigo-500">
                 </div>
@@ -1904,7 +1964,6 @@ def home():
                             </div>
                             <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-700 text-slate-200 text-xs mb-3 whitespace-pre-wrap" x-text="leave.reason"></div>
                             
-                            <!-- ATTACHMENT VIEW BUTTON -->
                             <div x-show="leave.document_data" class="mb-3">
                                 <a :href="leave.document_data" download="Leave_Attachment" class="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-sky-400 text-[11px] font-bold py-1.5 px-3 rounded-lg border border-slate-600 transition shadow">
                                     📎 View / Download Attached Document
@@ -2278,7 +2337,12 @@ def home():
                 tableRows: [],
                 tableTotalClasses: 0,
                 
-                // ABSENTEES LIST
+                // MULTI-CLASS SWITCHES
+                multiClassMode: false,
+                multiClassCount: 2,
+                tableMultiClassMode: false,
+                tableMultiClassCount: 2,
+                
                 absenteesList: [],
                 absenteesSubject: '',
                 absenteesDate: curDate,
@@ -2521,25 +2585,31 @@ def home():
                     }
                 },
                 async toggleCellAttendance(student, day) {
-                    let current = student.days[day];
-                    let nextStatus = current === 'P' ? 'Absent' : (current === 'A' ? 'Clear' : 'Present');
-                    let displayVal = current === 'P' ? 'A' : (current === 'A' ? '' : 'P');
-                    student.days[day] = displayVal;
+                    let current = student.days[day] || "";
+                    let mult = 1;
 
-                    let distinctDays = new Set();
-                    for (let s of this.tableRows) {
-                        for (let d = 1; d <= this.tableNumDays; d++) {
-                            if (s.days[d] === 'P' || s.days[d] === 'A') distinctDays.add(d);
-                        }
+                    if (this.tableMultiClassMode) {
+                        mult = parseInt(this.tableMultiClassCount) || 2;
+                    } else if (current.includes('x')) {
+                        mult = parseInt(current.replace(/\D/g, '')) || 1;
                     }
-                    this.tableTotalClasses = distinctDays.size;
-                    for (let s of this.tableRows) {
-                        let pCount = 0;
-                        for (let d = 1; d <= this.tableNumDays; d++) {
-                            if (s.days[d] === 'P') pCount++;
-                        }
-                        s.pct = this.tableTotalClasses > 0 ? Math.round((pCount / this.tableTotalClasses) * 100) : 0;
+
+                    let nextStatus;
+                    if (current.includes('P')) {
+                        nextStatus = 'Absent';
+                    } else if (current.includes('A')) {
+                        nextStatus = 'Clear';
+                    } else {
+                        nextStatus = 'Present';
                     }
+
+                    let displayVal = "";
+                    if (nextStatus === 'Present') {
+                        displayVal = mult > 1 ? `P${mult}x` : 'P';
+                    } else if (nextStatus === 'Absent') {
+                        displayVal = mult > 1 ? `A${mult}x` : 'A';
+                    }
+                    student.days[day] = displayVal;
 
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -2549,10 +2619,11 @@ def home():
                     formData.append('subject', this.tableSubject);
                     formData.append('date_str', dateStr);
                     formData.append('status', nextStatus);
+                    formData.append('multiplier', mult);
 
                     try {
-                        let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        if (!res.ok) this.loadTableData();
+                        await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        this.loadTableData();
                     } catch(e) {
                         this.loadTableData();
                     }
@@ -2585,12 +2656,15 @@ def home():
                     this.currentStudentPhoto = data.photo_data;
                 },
                 async markStatusBtn(status) {
+                    let mult = this.multiClassMode ? (parseInt(this.multiClassCount) || 1) : 1;
+                    
                     let formData = new FormData();
                     formData.append('user_id', this.userId);
                     formData.append('student_id', this.currentStudent.id);
                     formData.append('subject', this.selectedSubject);
                     formData.append('date_str', this.selectedDate);
                     formData.append('status', status);
+                    formData.append('multiplier', mult);
 
                     try {
                         let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });

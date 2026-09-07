@@ -2555,27 +2555,13 @@ def home():
                     }
                 },
                 
-                // --- FIXED: Silent data update method to completely remove flickering UI ---
-                async loadTableData(silent = false) {
+                async loadTableData() {
                     if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
                     let res = await fetch(`/api/attendance_table/${this.userId}?month=${this.tableMonth}&year=${this.tableYear}&subject=${this.tableSubject}`);
                     let data = await res.json();
                     this.tableNumDays = data.num_days;
+                    this.tableRows = data.table_data;
                     this.tableTotalClasses = data.total_classes;
-                    
-                    if (silent && this.tableRows.length > 0 && this.tableRows.length === data.table_data.length) {
-                        for(let i = 0; i < this.tableRows.length; i++) {
-                            if (this.tableRows[i].id === data.table_data[i].id) {
-                                this.tableRows[i].days = data.table_data[i].days;
-                                this.tableRows[i].pct = data.table_data[i].pct;
-                            } else {
-                                this.tableRows = data.table_data;
-                                break;
-                            }
-                        }
-                    } else {
-                        this.tableRows = data.table_data;
-                    }
                 },
 
                 async loadAbsentees() {
@@ -2591,7 +2577,7 @@ def home():
                     }
                 },
                 
-                // --- FIXED: Toggle function modified to trigger silent update without reloading screen ---
+                // === FIXED: Optimistic UI Update (No flickering, Zero reload lag) ===
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day] || "";
                     let mult = 1;
@@ -2602,10 +2588,11 @@ def home():
                         mult = parseInt(current.replace(/\D/g, '')) || 1;
                     }
 
+                    // Cycle logic: Empty -> Present -> Absent -> Clear
                     let nextStatus;
-                    if (current.includes('P')) {
+                    if (current.includes('P') && !current.includes('A')) {
                         nextStatus = 'Absent';
-                    } else if (current.includes('A')) {
+                    } else if (current.includes('A') && !current.includes('P')) {
                         nextStatus = 'Clear';
                     } else {
                         nextStatus = 'Present';
@@ -2618,9 +2605,24 @@ def home():
                         displayVal = mult > 1 ? `A${mult}x` : 'A';
                     }
                     
-                    // Local instant UI update
-                    student.days[day] = displayVal;
+                    // 1. Instant UI update (Zero lag)
+                    student.days = { ...student.days, [day]: displayVal };
 
+                    // 2. Instant Percentage Calculation (Keeps UI % updated immediately)
+                    let total_p = 0;
+                    for (let d = 1; d <= this.tableNumDays; d++) {
+                        let val = student.days[d] || "";
+                        if (val.includes('P') && !val.includes('A')) {
+                            let m = val.match(/P(\d+)x/);
+                            total_p += m ? parseInt(m[1]) : 1;
+                        } else if (val.includes('P') && val.includes('A')) {
+                            let m = val.match(/P(\d+)/);
+                            if (m) total_p += parseInt(m[1]);
+                        }
+                    }
+                    student.pct = this.tableTotalClasses > 0 ? Math.round((total_p / this.tableTotalClasses) * 100) : 0;
+
+                    // 3. Silent API Call (Sends data directly to database without reloading table)
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                     let formData = new FormData();
@@ -2632,10 +2634,10 @@ def home():
                     formData.append('multiplier', mult);
 
                     try {
-                        await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        this.loadTableData(true); // Silent true (prevents glitch/flickering)
+                        fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        // NO loadTableData() called here! Means absolutely NO FLICKERING!
                     } catch(e) {
-                        this.loadTableData(false); // In case of actual error
+                        console.error(e);
                     }
                 },
 

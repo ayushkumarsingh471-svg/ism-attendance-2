@@ -22,8 +22,8 @@ if not DATABASE_URL:
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-from sqlalchemy.pool import NullPool
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, poolclass=NullPool)
+# Optimization: Removed NullPool. Utilizing standard QueuePool for massive speed increases on database hits.
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=30)
 
 def init_master_db():
     try:
@@ -2611,6 +2611,17 @@ def home():
                     }
                     student.days[day] = displayVal;
 
+                    // Optimistic UI: Recalculate percentages visually right now
+                    let totalP = 0;
+                    for (let d = 1; d <= this.tableNumDays; d++) {
+                        let val = student.days[d] || "";
+                        if (val.includes('P')) {
+                            let m = val.includes('x') ? (parseInt(val.replace(/\D/g, '')) || 1) : 1;
+                            totalP += m;
+                        }
+                    }
+                    student.pct = this.tableTotalClasses > 0 ? Math.round((totalP / this.tableTotalClasses) * 100) : 0;
+
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                     let formData = new FormData();
@@ -2621,12 +2632,8 @@ def home():
                     formData.append('status', nextStatus);
                     formData.append('multiplier', mult);
 
-                    try {
-                        await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        this.loadTableData();
-                    } catch(e) {
-                        this.loadTableData();
-                    }
+                    // Background API Hit (No await to keep UI lightning fast)
+                    fetch('/api/mark_attendance', { method: 'POST', body: formData }).catch(e => console.error(e));
                 },
                 async loadReportData() {
                     let res = await fetch(`/api/compile_report/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`);
@@ -2666,20 +2673,19 @@ def home():
                     formData.append('status', status);
                     formData.append('multiplier', mult);
 
-                    try {
-                        let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        if (res.ok) {
-                            if (this.currentIndex < this.students.length - 1) {
-                                this.currentIndex++;
-                                this.fetchStudentDetails();
-                            }
-                            await this.loadData();
+                    // Run the fetch in the background
+                    fetch('/api/mark_attendance', { method: 'POST', body: formData }).then(res => {
+                        if (!res.ok) {
+                            res.json().then(data => alert("Error saving attendance: " + data.detail));
                         } else {
-                            let data = await res.json();
-                            alert("Error saving attendance: " + data.detail);
+                            this.loadData();
                         }
-                    } catch(e) {
-                        alert("Network error.");
+                    }).catch(e => alert("Network error."));
+
+                    // Optimistic UI update: instantly jump to the next student
+                    if (this.currentIndex < this.students.length - 1) {
+                        this.currentIndex++;
+                        this.fetchStudentDetails();
                     }
                 },
                 searchByReg() {
@@ -3018,4 +3024,4 @@ def home():
         }
     </script>
 </body>
-</html>"""
+</html>

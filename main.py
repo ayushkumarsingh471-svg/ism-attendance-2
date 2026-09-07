@@ -18,12 +18,11 @@ if not DATABASE_URL:
         DATABASE_URL = st.secrets["DATABASE_URL"]
     except Exception:
         DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
-
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Optimization: Utilizing standard QueuePool for massive speed increases on database hits.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=20, max_overflow=30)
+from sqlalchemy.pool import NullPool
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, poolclass=NullPool)
 
 def init_master_db():
     try:
@@ -112,7 +111,6 @@ def init_tenant_db(user_id):
 # ==========================================
 # AUTHENTICATION APIS
 # ==========================================
-
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
     u = username.strip()
@@ -248,7 +246,6 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
 # ==========================================
 # LEAVE SYSTEM APIS
 # ==========================================
-
 @app.post("/api/apply_leave")
 async def apply_leave(
     faculty_id: str = Form(...),
@@ -259,8 +256,7 @@ async def apply_leave(
     from_date: str = Form(...),
     to_date: str = Form(...),
     reason: str = Form(...),
-    file: UploadFile = File(None)
-):
+    file: UploadFile = File(None)):
     try:
         encoded_doc = ""
         if file and file.filename:
@@ -316,8 +312,7 @@ def update_leave_status(
     user_id: str = Form(...),
     leave_id: int = Form(...),
     status: str = Form(...),
-    faculty_remark: str = Form("")
-):
+    faculty_remark: str = Form("")):
     try:
         safe_uid = get_safe_prefix(user_id)
         t_leaves = f"{safe_uid}_leaves"
@@ -334,7 +329,6 @@ def update_leave_status(
 # ==========================================
 # FACULTY CORE APIS
 # ==========================================
-
 @app.get("/api/data/{user_id}")
 def get_dashboard_data(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE", target_date: str = "2026-07-25"):
     init_tenant_db(user_id)
@@ -540,7 +534,6 @@ def download_absentees_pdf(user_id: str, subject: str = "BE", date_str: str = ""
     doc.build(elements)
     pdf_buf.seek(0)
     return StreamingResponse(pdf_buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=Absentees_{subject}_{date_str}.pdf"})
-
 
 @app.get("/api/download_defaulters_excel/{user_id}")
 def download_defaulters_excel(user_id: str, month: str = "July", year: int = 2026, subject: str = "BE"):
@@ -1011,8 +1004,7 @@ def mark_attendance(
     subject: str = Form(...), 
     date_str: str = Form(...), 
     status: str = Form(...),
-    multiplier: int = Form(1)
-):
+    multiplier: int = Form(1)):
     try:
         safe_uid = get_safe_prefix(user_id)
         t_subjects = f"{safe_uid}_subjects"
@@ -1425,11 +1417,9 @@ def get_manifest():
         return FileResponse("manifest.json", media_type="application/json")
     return {"error": "manifest.json file not found in root directory"}
 
-
 # ==========================================
 # FRONTEND UI (COMPLETE & UNIFIED)
 # ==========================================
-
 @app.get("/", response_class=HTMLResponse)
 def home():
     return r"""
@@ -2564,14 +2554,30 @@ def home():
                         console.error(e);
                     }
                 },
-                async loadTableData() {
+                
+                // --- FIXED: Silent data update method to completely remove flickering UI ---
+                async loadTableData(silent = false) {
                     if (!this.tableSubject && this.subjects.length > 0) this.tableSubject = this.subjects[0];
                     let res = await fetch(`/api/attendance_table/${this.userId}?month=${this.tableMonth}&year=${this.tableYear}&subject=${this.tableSubject}`);
                     let data = await res.json();
                     this.tableNumDays = data.num_days;
-                    this.tableRows = data.table_data;
                     this.tableTotalClasses = data.total_classes;
+                    
+                    if (silent && this.tableRows.length > 0 && this.tableRows.length === data.table_data.length) {
+                        for(let i = 0; i < this.tableRows.length; i++) {
+                            if (this.tableRows[i].id === data.table_data[i].id) {
+                                this.tableRows[i].days = data.table_data[i].days;
+                                this.tableRows[i].pct = data.table_data[i].pct;
+                            } else {
+                                this.tableRows = data.table_data;
+                                break;
+                            }
+                        }
+                    } else {
+                        this.tableRows = data.table_data;
+                    }
                 },
+
                 async loadAbsentees() {
                     if (!this.absenteesSubject && this.subjects.length > 0) this.absenteesSubject = this.subjects[0];
                     if (!this.absenteesDate) this.absenteesDate = this.selectedDate;
@@ -2584,6 +2590,8 @@ def home():
                         console.error("Error loading absentees:", e);
                     }
                 },
+                
+                // --- FIXED: Toggle function modified to trigger silent update without reloading screen ---
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day] || "";
                     let mult = 1;
@@ -2609,18 +2617,9 @@ def home():
                     } else if (nextStatus === 'Absent') {
                         displayVal = mult > 1 ? `A${mult}x` : 'A';
                     }
+                    
+                    // Local instant UI update
                     student.days[day] = displayVal;
-
-                    // Optimistic UI: Recalculate percentages visually right now
-                    let totalP = 0;
-                    for (let d = 1; d <= this.tableNumDays; d++) {
-                        let val = student.days[d] || "";
-                        if (val.includes('P')) {
-                            let m = val.includes('x') ? (parseInt(val.replace(/\D/g, '')) || 1) : 1;
-                            totalP += m;
-                        }
-                    }
-                    student.pct = this.tableTotalClasses > 0 ? Math.round((totalP / this.tableTotalClasses) * 100) : 0;
 
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -2632,9 +2631,14 @@ def home():
                     formData.append('status', nextStatus);
                     formData.append('multiplier', mult);
 
-                    // Background API Hit (No await to keep UI lightning fast)
-                    fetch('/api/mark_attendance', { method: 'POST', body: formData }).catch(e => console.error(e));
+                    try {
+                        await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        this.loadTableData(true); // Silent true (prevents glitch/flickering)
+                    } catch(e) {
+                        this.loadTableData(false); // In case of actual error
+                    }
                 },
+
                 async loadReportData() {
                     let res = await fetch(`/api/compile_report/${this.userId}?month=${this.reportMonth}&year=${this.reportYear}`);
                     let data = await res.json();
@@ -2673,19 +2677,20 @@ def home():
                     formData.append('status', status);
                     formData.append('multiplier', mult);
 
-                    // Run the fetch in the background
-                    fetch('/api/mark_attendance', { method: 'POST', body: formData }).then(res => {
-                        if (!res.ok) {
-                            res.json().then(data => alert("Error saving attendance: " + data.detail));
+                    try {
+                        let res = await fetch('/api/mark_attendance', { method: 'POST', body: formData });
+                        if (res.ok) {
+                            if (this.currentIndex < this.students.length - 1) {
+                                this.currentIndex++;
+                                this.fetchStudentDetails();
+                            }
+                            await this.loadData();
                         } else {
-                            this.loadData();
+                            let data = await res.json();
+                            alert("Error saving attendance: " + data.detail);
                         }
-                    }).catch(e => alert("Network error."));
-
-                    // Optimistic UI update: instantly jump to the next student
-                    if (this.currentIndex < this.students.length - 1) {
-                        this.currentIndex++;
-                        this.fetchStudentDetails();
+                    } catch(e) {
+                        alert("Network error.");
                     }
                 },
                 searchByReg() {
@@ -3024,4 +3029,4 @@ def home():
         }
     </script>
 </body>
-</html>
+</html>"""

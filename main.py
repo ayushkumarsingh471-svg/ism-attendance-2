@@ -11,13 +11,8 @@ from sqlalchemy import create_engine, text
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    try:
-        import streamlit as st
-        DATABASE_URL = st.secrets["DATABASE_URL"]
-    except Exception:
-        DATABASE_URL = "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
+# Cleaned up URL allocation for Vercel (Removed Streamlit block)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -36,7 +31,7 @@ def init_master_db():
     except Exception as e:
         print("Master DB init error:", e)
 
-init_master_db()
+# Removed the global call to init_master_db() from here to prevent Vercel Timeout
 
 def get_safe_prefix(uid):
     clean = "".join(c for c in str(uid) if c.isalnum() or c == '_').lower()
@@ -121,6 +116,7 @@ def init_tenant_db(user_id):
 # ==========================================
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
+    init_master_db() # Lazy initialization applied here
     u = username.strip()
     with engine.begin() as conn:
         res = conn.execute(text("SELECT * FROM master_users WHERE username=:u AND password=:p"), {"u": u, "p": password}).fetchone()
@@ -131,6 +127,7 @@ def login(username: str = Form(...), password: str = Form(...)):
 
 @app.post("/api/register")
 def register(username: str = Form(...), password: str = Form(...)):
+    init_master_db() # Lazy initialization applied here
     u = username.strip()
     if not u or not password:
         raise HTTPException(status_code=400, detail="Both fields are required.")
@@ -144,6 +141,7 @@ def register(username: str = Form(...), password: str = Form(...)):
 
 @app.post("/api/student_login")
 def student_login(reg_no: str = Form(...), name: str = Form(...)):
+    init_master_db() # Lazy initialization applied here
     r_no = reg_no.strip()
     s_name = name.strip()
 

@@ -8,16 +8,31 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 
-# Cleaned up URL allocation for Vercel (Removed Streamlit block)
+# --- VERCEL MAGIC FIX: LAZY ENGINE WRAPPER ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-from sqlalchemy.pool import NullPool
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, poolclass=NullPool)
+class VercelSafeEngine:
+    def __init__(self, url):
+        self.url = url
+        self._engine = None
+
+    @property
+    def engine(self):
+        if self._engine is None:
+            self._engine = create_engine(self.url, pool_pre_ping=True, poolclass=NullPool)
+        return self._engine
+
+    def begin(self):
+        return self.engine.begin()
+
+engine = VercelSafeEngine(DATABASE_URL)
+# ----------------------------------------------
 
 def init_master_db():
     try:
@@ -31,7 +46,7 @@ def init_master_db():
     except Exception as e:
         print("Master DB init error:", e)
 
-# Removed the global call to init_master_db() from here to prevent Vercel Timeout
+# NOTE: Global database init calls removed here to prevent Vercel Cold-Start crashes.
 
 def get_safe_prefix(uid):
     clean = "".join(c for c in str(uid) if c.isalnum() or c == '_').lower()
@@ -116,7 +131,7 @@ def init_tenant_db(user_id):
 # ==========================================
 @app.post("/api/login")
 def login(username: str = Form(...), password: str = Form(...)):
-    init_master_db() # Lazy initialization applied here
+    init_master_db() # Lazy execution
     u = username.strip()
     with engine.begin() as conn:
         res = conn.execute(text("SELECT * FROM master_users WHERE username=:u AND password=:p"), {"u": u, "p": password}).fetchone()
@@ -127,7 +142,7 @@ def login(username: str = Form(...), password: str = Form(...)):
 
 @app.post("/api/register")
 def register(username: str = Form(...), password: str = Form(...)):
-    init_master_db() # Lazy initialization applied here
+    init_master_db() # Lazy execution
     u = username.strip()
     if not u or not password:
         raise HTTPException(status_code=400, detail="Both fields are required.")
@@ -141,7 +156,7 @@ def register(username: str = Form(...), password: str = Form(...)):
 
 @app.post("/api/student_login")
 def student_login(reg_no: str = Form(...), name: str = Form(...)):
-    init_master_db() # Lazy initialization applied here
+    init_master_db() # Lazy execution
     r_no = reg_no.strip()
     s_name = name.strip()
 

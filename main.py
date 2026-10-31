@@ -15,7 +15,9 @@ app = FastAPI(title="ISM Attendance ERP - Final Full Edition")
 # --- VERCEL MAGIC FIX: LAZY ENGINE WRAPPER ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.parhsaqmmmiyojwkhsrn:%40fr3rdEyp.%2B%25ug%3D@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres")
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 class VercelSafeEngine:
     def __init__(self, url):

@@ -60,6 +60,7 @@ def init_tenant_db(user_id):
     t_settings = f"{safe_uid}_settings"
     t_details = f"{safe_uid}_student_details"
     t_leaves = f"{safe_uid}_leaves"
+    t_results = f"{safe_uid}_results"
 
     with engine.begin() as conn:
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS {t_students} (id SERIAL PRIMARY KEY, reg_no TEXT UNIQUE, roll_no TEXT, name TEXT)'))
@@ -88,6 +89,13 @@ def init_tenant_db(user_id):
             faculty_remark TEXT DEFAULT '',
             created_at TEXT DEFAULT '',
             document_data TEXT DEFAULT ''
+        )'''))
+        conn.execute(text(f'''CREATE TABLE IF NOT EXISTS {t_results} (
+            id SERIAL PRIMARY KEY,
+            reg_no TEXT,
+            result_type TEXT,
+            file_data TEXT,
+            UNIQUE(reg_no, result_type)
         )'''))
 
         try:
@@ -165,6 +173,7 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
     t_attendance = f"{safe_uid}_attendance"
     t_settings = f"{safe_uid}_settings"
     t_leaves = f"{safe_uid}_leaves"
+    t_results = f"{safe_uid}_results"
 
     with engine.begin() as conn:
         st = conn.execute(text(f"SELECT id, name, roll_no FROM {t_students} WHERE LOWER(reg_no)=LOWER(:r)"), {"r": reg_no.strip()}).fetchone()
@@ -218,6 +227,13 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
         except Exception:
             leaves = []
 
+        results_data = []
+        try:
+            res_rows = conn.execute(text(f"SELECT result_type, file_data FROM {t_results} WHERE LOWER(reg_no) = LOWER(:r)"), {"r": reg_no.strip()}).fetchall()
+            results_data = [{"type": r[0], "file_data": r[1]} for r in res_rows]
+        except Exception:
+            pass
+
         def get_cfg(k, def_v):
             try:
                 res = conn.execute(text(f"SELECT value FROM {t_settings} WHERE key=:k"), {"k": k}).fetchone()
@@ -238,10 +254,57 @@ def get_student_dashboard_data(faculty_id: str, reg_no: str):
             "summary": summary,
             "history": history,
             "leaves": leaves,
+            "results": results_data,
             "college_name": college_name,
             "course": f"{subtitle} | {course} | {sec}",
             "logo": college_logo
         }
+
+# ==========================================
+# RESULT UPLOAD API
+# ==========================================
+@app.post("/api/upload_result")
+async def upload_result(
+    faculty_id: str = Form(...),
+    reg_no: str = Form(...),
+    result_type: str = Form(...),
+    file: UploadFile = File(...)
+):
+    try:
+        encoded_doc = ""
+        if file and file.filename:
+            contents = await file.read()
+            mime_type = file.content_type or "application/pdf"
+            encoded_doc = f"data:{mime_type};base64,{base64.b64encode(contents).decode('utf-8')}"
+        
+        safe_uid = get_safe_prefix(faculty_id)
+        t_results = f"{safe_uid}_results"
+        
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                INSERT INTO {t_results} (reg_no, result_type, file_data)
+                VALUES (:r, :rt, :fd)
+                ON CONFLICT (reg_no, result_type)
+                DO UPDATE SET file_data = EXCLUDED.file_data
+            """), {"r": reg_no.strip(), "rt": result_type.strip(), "fd": encoded_doc})
+        return {"success": True, "message": f"{result_type} uploaded successfully for {reg_no}!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Result Upload Failed: " + str(e))
+
+@app.get("/api/faculty_results/{user_id}")
+def get_faculty_results(user_id: str):
+    safe_uid = get_safe_prefix(user_id)
+    t_results = f"{safe_uid}_results"
+    with engine.begin() as conn:
+        try:
+            rows = conn.execute(text(f"SELECT reg_no, result_type, file_data FROM {t_results}")).fetchall()
+            res_map = {}
+            for r, rt, fd in rows:
+                if r not in res_map: res_map[r] = {}
+                res_map[r][rt] = fd
+            return {"results": res_map}
+        except Exception:
+            return {"results": {}}
 
 # ==========================================
 # LEAVE SYSTEM APIS
@@ -1076,6 +1139,7 @@ def delete_all_students(user_id: str = Form(...)):
             conn.execute(text(f"DELETE FROM {safe_uid}_attendance"))
             conn.execute(text(f"DELETE FROM {safe_uid}_student_details"))
             conn.execute(text(f"DELETE FROM {safe_uid}_leaves"))
+            conn.execute(text(f"DELETE FROM {safe_uid}_results"))
             conn.execute(text(f"DELETE FROM {safe_uid}_students"))
         return {"success": True, "message": "All students and their records deleted successfully!"}
     except Exception as e:
@@ -1149,6 +1213,7 @@ def delete_student(user_id: str = Form(...), reg_no: str = Form(...)):
             
             conn.execute(text(f"DELETE FROM {safe_uid}_student_details WHERE reg_no=:r"), {"r": r})
             conn.execute(text(f"DELETE FROM {safe_uid}_leaves WHERE reg_no=:r"), {"r": r})
+            conn.execute(text(f"DELETE FROM {safe_uid}_results WHERE reg_no=:r"), {"r": r})
             conn.execute(text(f"DELETE FROM {safe_uid}_students WHERE reg_no=:r"), {"r": r})
             
         return {"success": True, "message": "Single student deleted successfully!"}
@@ -1581,6 +1646,9 @@ def home():
                         <span class="flex items-center gap-2">✉️ Leave Requests</span>
                         <span x-show="pendingLeavesCount > 0" class="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full" x-text="pendingLeavesCount"></span>
                     </button>
+                    
+                    <button @click="currentTab = 'results'; loadData(); loadFacultyResults()" :class="currentTab === 'results' ? 'bg-fuchsia-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-fuchsia-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">📄 Student Result</button>
+                    
                     <button @click="currentTab = 'reset'" :class="currentTab === 'reset' ? 'bg-red-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-red-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🧹 Reset / Clear Logs</button>
                     <button @click="currentTab = 'students'; loadData()" :class="currentTab === 'students' ? 'bg-cyan-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-cyan-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">👥 Manage Students</button>
                     <button @click="currentTab = 'profile'" :class="currentTab === 'profile' ? 'bg-pink-600 border-2 border-yellow-300 shadow-lg scale-105' : 'bg-pink-900/80'" class="w-full text-left py-2.5 px-4 rounded-xl transition flex items-center gap-2">🏢 College Profile</button>
@@ -1976,6 +2044,59 @@ def home():
                 </div>
             </div>
 
+            <!-- STUDENT RESULTS TAB -->
+            <div x-show="currentTab === 'results'">
+                <div class="glass-card p-6 rounded-3xl shadow-2xl border-2 border-fuchsia-500/50">
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                            <h2 class="text-2xl font-black text-fuchsia-400">📄 Student Results Management</h2>
+                            <p class="text-xs text-slate-300">Upload and manage External, Class Test, and Internal results for students in PDF format.</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Result Type Switcher -->
+                    <div class="flex gap-4 mb-6">
+                        <button @click="currentResultTab = 'External Result'" :class="currentResultTab === 'External Result' ? 'bg-fuchsia-600 text-white' : 'bg-slate-800 text-slate-400'" class="px-6 py-2.5 rounded-xl font-bold transition">External Result</button>
+                        <button @click="currentResultTab = 'Class Test Result'" :class="currentResultTab === 'Class Test Result' ? 'bg-fuchsia-600 text-white' : 'bg-slate-800 text-slate-400'" class="px-6 py-2.5 rounded-xl font-bold transition">Class Test Result</button>
+                        <button @click="currentResultTab = 'Internal Result'" :class="currentResultTab === 'Internal Result' ? 'bg-fuchsia-600 text-white' : 'bg-slate-800 text-slate-400'" class="px-6 py-2.5 rounded-xl font-bold transition">Internal Result</button>
+                    </div>
+                    
+                    <div class="overflow-x-auto bg-slate-900/80 rounded-2xl border border-fuchsia-500/30">
+                        <table class="w-full text-sm text-center">
+                            <thead>
+                                <tr class="bg-fuchsia-950/80 text-fuchsia-300 font-bold border-b border-fuchsia-500/40">
+                                    <th class="p-3 text-left w-32">Reg No</th>
+                                    <th class="p-3 text-left">Student Name</th>
+                                    <th class="p-3 w-56">Upload PDF</th>
+                                    <th class="p-3 w-40">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-slate-200">
+                                <template x-for="st in students" :key="st.reg_no">
+                                    <tr class="border-b border-slate-800 hover:bg-fuchsia-950/20">
+                                        <td class="p-3 font-mono text-left text-sky-400" x-text="st.reg_no"></td>
+                                        <td class="p-3 font-bold text-left" x-text="st.name"></td>
+                                        <td class="p-3">
+                                            <input type="file" :id="'result_file_' + st.reg_no" accept="application/pdf" class="text-xs bg-slate-800 text-slate-300 p-1.5 rounded-lg border border-slate-600 w-full max-w-[200px]">
+                                        </td>
+                                        <td class="p-3 flex justify-center gap-2">
+                                            <button @click="uploadStudentResult(st.reg_no, 'result_file_' + st.reg_no)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow">Upload</button>
+                                            
+                                            <template x-if="facultyResultsMap[st.reg_no] && facultyResultsMap[st.reg_no][currentResultTab]">
+                                                <a :href="facultyResultsMap[st.reg_no][currentResultTab]" target="_blank" download class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow flex items-center">View</a>
+                                            </template>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="students.length === 0">
+                                    <td colspan="4" class="p-6 text-center text-slate-500 font-bold">No students registered yet.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- RESET TAB -->
             <div x-show="currentTab === 'reset'">
                 <div class="glass-card p-6 rounded-2xl space-y-6">
@@ -2128,6 +2249,26 @@ def home():
                         <p class="mt-4 text-xs font-bold" :class="studentDashData.overall_pct >= 75 ? 'text-emerald-400' : 'text-red-400'">
                             <span x-text="studentDashData.overall_pct >= 75 ? '✅ Safe Attendance Zone' : '⚠️ Shortage Zone (< 75%)'"></span>
                         </p>
+                    </div>
+                </div>
+
+                <!-- 4. ACADEMIC RESULTS (STUDENT) -->
+                <div class="glass-card p-6 rounded-3xl">
+                    <h3 class="text-xl font-black text-fuchsia-400 mb-4">📄 Academic Results</h3>
+                    <div class="space-y-3 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
+                        <template x-if="studentDashData.results && studentDashData.results.length > 0">
+                            <template x-for="res in studentDashData.results">
+                                <div class="bg-slate-900/90 p-4 rounded-2xl border border-fuchsia-500/30 flex justify-between items-center">
+                                    <div>
+                                        <h4 class="font-black text-white text-sm" x-text="res.type"></h4>
+                                    </div>
+                                    <div>
+                                        <a :href="res.file_data" download="Result_Document.pdf" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow transition">👁️ View PDF</a>
+                                    </div>
+                                </div>
+                            </template>
+                        </template>
+                        <p x-show="!studentDashData.results || studentDashData.results.length === 0" class="text-slate-500 text-center text-sm py-4">No academic results uploaded yet.</p>
                     </div>
                 </div>
             </div>
@@ -2360,6 +2501,10 @@ def home():
                 facultyLeaves: [],
                 leaveRemarkInput: {},
                 leaveSearchQuery: '',
+                
+                // RESULTS DATA
+                currentResultTab: 'External Result',
+                facultyResultsMap: {},
 
                 init() { this.syncFromDate(); },
                 syncFromDate() {
@@ -2458,6 +2603,43 @@ def home():
                         }
                     } catch (e) {
                         alert("Error loading dashboard data.");
+                    }
+                },
+                async loadFacultyResults() {
+                    try {
+                        let res = await fetch(`/api/faculty_results/${this.userId}`);
+                        let data = await res.json();
+                        this.facultyResultsMap = data.results || {};
+                    } catch(e) {
+                        console.error(e);
+                    }
+                },
+                async uploadStudentResult(regNo, fileInputId) {
+                    let fileInput = document.getElementById(fileInputId);
+                    if (!fileInput || fileInput.files.length === 0) { alert('Please select a PDF file first.'); return; }
+                    if (this.isProcessing) return;
+                    this.isProcessing = true;
+                    
+                    let formData = new FormData();
+                    formData.append('faculty_id', this.userId);
+                    formData.append('reg_no', regNo);
+                    formData.append('result_type', this.currentResultTab);
+                    formData.append('file', fileInput.files[0]);
+                    
+                    try {
+                        let res = await fetch('/api/upload_result', { method: 'POST', body: formData });
+                        let data = await res.json();
+                        if (res.ok) {
+                            alert(data.message);
+                            await this.loadFacultyResults();
+                            fileInput.value = '';
+                        } else {
+                            alert('Error: ' + data.detail);
+                        }
+                    } catch(e) {
+                        alert('Network Error');
+                    } finally {
+                        this.isProcessing = false;
                     }
                 },
                 async submitLeaveApplication() {
@@ -2577,7 +2759,6 @@ def home():
                     }
                 },
                 
-                // === FIXED: Optimistic UI Update (No flickering, Zero reload lag) ===
                 async toggleCellAttendance(student, day) {
                     let current = student.days[day] || "";
                     let mult = 1;
@@ -2588,7 +2769,6 @@ def home():
                         mult = parseInt(current.replace(/\D/g, '')) || 1;
                     }
 
-                    // Cycle logic: Empty -> Present -> Absent -> Clear
                     let nextStatus;
                     if (current.includes('P') && !current.includes('A')) {
                         nextStatus = 'Absent';
@@ -2605,10 +2785,8 @@ def home():
                         displayVal = mult > 1 ? `A${mult}x` : 'A';
                     }
                     
-                    // 1. Instant UI update (Zero lag)
                     student.days = { ...student.days, [day]: displayVal };
 
-                    // 2. Instant Percentage Calculation (Keeps UI % updated immediately)
                     let total_p = 0;
                     for (let d = 1; d <= this.tableNumDays; d++) {
                         let val = student.days[d] || "";
@@ -2622,7 +2800,6 @@ def home():
                     }
                     student.pct = this.tableTotalClasses > 0 ? Math.round((total_p / this.tableTotalClasses) * 100) : 0;
 
-                    // 3. Silent API Call (Sends data directly to database without reloading table)
                     let mIdx = this.months.indexOf(this.tableMonth) + 1;
                     let dateStr = `${this.tableYear}-${String(mIdx).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                     let formData = new FormData();
@@ -2635,7 +2812,6 @@ def home():
 
                     try {
                         fetch('/api/mark_attendance', { method: 'POST', body: formData });
-                        // NO loadTableData() called here! Means absolutely NO FLICKERING!
                     } catch(e) {
                         console.error(e);
                     }
@@ -3031,4 +3207,5 @@ def home():
         }
     </script>
 </body>
-</html>"""
+</html>
+"""
